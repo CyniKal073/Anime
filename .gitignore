@@ -3,6 +3,7 @@ data/
 __pycache__/
 *.py[cod]
 .pytest_cache/
+.scratch/
 .venv/
 venv/
 *.torrent
