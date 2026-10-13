@@ -490,6 +490,7 @@ async function doDownload(rel, btn) {
         torrent_url: rel.torrent_url || null,
         infohash: rel.infohash,
         title: rel.title,
+        save_path: ($("savePath") && $("savePath").value.trim()) || null,
         paused: $("pausedAdd").checked,
       }),
     });
@@ -594,7 +595,54 @@ window.addEventListener("DOMContentLoaded", () => {
   };
   $("subProbe").onclick = probeSubtitles;
   $("subMerge").onclick = mergeSubtitles;
+  loadDownloadPath();
+  $("savePathDefault").onclick = saveDownloadPathAsDefault;
+  $("savePath").onchange = () => localStorage.setItem("savePath", $("savePath").value.trim());
 });
+
+/* ------------------------------------------------------------ 下载目录 */
+
+async function loadDownloadPath() {
+  try {
+    const r = await api("/api/download-path");
+    const options = $("savePathOptions");
+    options.innerHTML = "";
+    (r.suggestions || []).forEach((item) => {
+      const option = document.createElement("option");
+      option.value = item;
+      options.appendChild(option);
+    });
+    // 优先用上次手填的，其次用服务端的默认
+    const remembered = localStorage.getItem("savePath");
+    $("savePath").value = remembered || r.path || "";
+    $("savePath").title =
+      r.source === "custom" ? `默认目录（界面设置）：${r.path}` : `默认目录（.env）：${r.path}`;
+  } catch (err) {
+    /* 拿不到就用空值，下载时交给后端兜底 */
+  }
+}
+
+async function saveDownloadPathAsDefault() {
+  const path = $("savePath").value.trim();
+  try {
+    const r = await api("/api/download-path", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path }),
+    });
+    localStorage.setItem("savePath", r.path || "");
+    $("savePath").value = r.path || "";
+    toast(
+      r.source === "custom"
+        ? `默认保存目录已改为：${r.path}`
+        : `已恢复为 .env 里的默认目录：${r.path}`,
+      "ok"
+    );
+    loadDownloadPath();
+  } catch (err) {
+    toast("设置失败：" + err.message, "bad");
+  }
+}
 
 /* ------------------------------------------------------------ 字幕合并 */
 

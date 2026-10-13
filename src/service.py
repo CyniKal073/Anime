@@ -50,10 +50,80 @@ CALENDAR_TTL = 1800
 #: Bangumi → nekoBT 的桥接结果、以及 Bangumi 搜索结果
 BRIDGE_TTL = 7 * 24 * 3600
 SEARCH_TTL = 600
+#: 用户自定义的下载目录（存在 settings 表里，覆盖 .env 的 QBIT_SAVEPATH）
+DOWNLOAD_PATH_KEY = "download_path"
+#: 路径里不允许出现的字符。冒号单独判断——盘符必须是 X: 这种形式。
+_INVALID_PATH_CHARS = set('<>"|?*')
 
 
 class TorrentFetchError(RuntimeError):
     """从外部来源下载 .torrent 失败。"""
+
+
+def effective_save_path(ctx: ServiceContext) -> str:
+    """实际使用的下载目录：界面里设过的优先，其次 .env 的 QBIT_SAVEPATH。"""
+    return ctx.store.get_setting(DOWNLOAD_PATH_KEY) or ctx.settings.qbit_savepath
+
+
+def normalize_save_path(raw: Optional[str]) -> Optional[str]:
+    """清理用户输入的路径，明显非法就返回 None。"""
+    if raw is None:
+        return None
+    text = raw.strip().strip('"').strip("'")
+    if not text:
+        return None
+    # 盘符（C:）是合法的，冒号只允许出现在这里
+    prefix = text[:2] if len(text) >= 2 and text[0].isalpha() and text[1] == ":" else ""
+    body = text[len(prefix):]
+    if any(ch in _INVALID_PATH_CHARS or ch == ":" for ch in body):
+        raise ValueError(f'路径里有 Windows 不允许的字符（< > : " | ? *）：{text}')
+    return text.rstrip("\\/") or text
+
+
+def download_paths(ctx: ServiceContext) -> Dict[str, Any]:
+    """下载目录的当前值与候选项（给界面做自动补全）。"""
+    current = effective_save_path(ctx)
+    options: List[str] = [current]
+
+    # 默认目录下已经存在的子文件夹
+    try:
+        root = Path(current)
+        if root.is_dir():
+            for item in sorted(root.iterdir()):
+                if item.is_dir():
+                    options.append(str(item))
+    except OSError:
+        pass
+
+    # 历史下载用过的目录
+    try:
+        for row in ctx.store.list_downloads(50):
+            value = row["save_path"]
+            if value:
+                options.append(value)
+    except Exception:  # noqa: BLE001 - 仅仅是补全建议
+        pass
+
+    seen: List[str] = []
+    for item in options:
+        if item and item not in seen:
+            seen.append(item)
+    return {
+        "path": current,
+        "source": "custom" if ctx.store.get_setting(DOWNLOAD_PATH_KEY) else "env",
+        "env_path": ctx.settings.qbit_savepath,
+        "suggestions": seen[:30],
+    }
+
+
+def set_download_path(ctx: ServiceContext, path: str) -> Dict[str, Any]:
+    """把下载目录设为默认（存进 settings 表，不动 .env）。"""
+    cleaned = normalize_save_path(path)
+    if not cleaned:
+        ctx.store.set_setting(DOWNLOAD_PATH_KEY, "")
+        return {"ok": True, "path": ctx.settings.qbit_savepath, "source": "env"}
+    ctx.store.set_setting(DOWNLOAD_PATH_KEY, cleaned)
+    return {"ok": True, "path": cleaned, "source": "custom"}
 
 
 @dataclass
@@ -781,7 +851,12 @@ def submit_download(
         content, filename = ctx.nekobt.download_torrent(torrent_id, public=True)
     else:
         raise TorrentFetchError("必须提供 torrent_id（nekoBT）或 torrent_url（其它来源）")
-    target = save_path or settings.qbit_savepath
+    # 优先级：本次请求指定的 > 界面里设过的默认 > .env 的 QBIT_SAVEPATH
+    try:
+        cleaned = normalize_save_path(save_path)
+    except ValueError as exc:
+        raise TorrentFetchError(str(exc)) from exc
+    target = cleaned or effective_save_path(ctx)
 
     ctx.qbit.add_torrent(
         torrent_bytes=content,

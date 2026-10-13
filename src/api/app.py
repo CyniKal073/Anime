@@ -28,6 +28,7 @@ from ..service import (
     build_context,
     calendar_view,
     confirm_mapping,
+    download_paths,
     health,
     list_library,
     list_releases,
@@ -37,6 +38,7 @@ from ..service import (
     preferences_to_dict,
     resolve_work,
     save_preferences,
+    set_download_path,
     subtitle_merge,
     subtitle_probe,
     submit_download,
@@ -62,7 +64,13 @@ class DownloadRequest(BaseModel):
     torrent_url: Optional[str] = None
     infohash: Optional[str] = None
     title: Optional[str] = None
+    #: 本次下载的保存目录；留空则用界面里设过的默认
+    save_path: Optional[str] = None
     paused: bool = False
+
+
+class DownloadPathRequest(BaseModel):
+    path: str = ""
 
 
 class PreferencesRequest(BaseModel):
@@ -196,6 +204,7 @@ def create_app() -> FastAPI:
                 paused=req.paused,
                 infohash=req.infohash,
                 title=req.title,
+                save_path=req.save_path,
             )
         except ConfigError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -209,6 +218,22 @@ def create_app() -> FastAPI:
     ) -> Dict[str, Any]:
         rows = ctx.store.list_downloads(max(1, min(limit, 200)))
         return {"items": [dict(row) for row in rows]}
+
+    @app.get("/api/download-path")
+    def api_download_path(ctx: ServiceContext = Depends(get_context)) -> Dict[str, Any]:
+        """当前下载目录与候选项（界面里可以改，比 .env 更灵活）。"""
+        return download_paths(ctx)
+
+    @app.post("/api/download-path")
+    def api_set_download_path(
+        req: DownloadPathRequest,
+        ctx: ServiceContext = Depends(get_context),
+    ) -> Dict[str, Any]:
+        """把下载目录设为默认；传空字符串表示恢复成 .env 里的值。"""
+        try:
+            return set_download_path(ctx, req.path)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @app.get("/api/mikan/releases")
     def api_mikan_releases(

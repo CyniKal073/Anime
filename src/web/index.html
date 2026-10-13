@@ -148,6 +148,13 @@
       <label class="check">
         <input id="pausedAdd" type="checkbox"> 添加到客户端后暂停
       </label>
+      <!-- 保存目录：本次下载用它；点「设为默认」写进本地设置（不改 .env）。
+           输入框支持自动补全：默认目录、它的子文件夹、以及历史下载用过的目录 -->
+      <label>保存到
+        <input id="savePath" list="savePathOptions" placeholder="留空 = 用默认目录">
+      </label>
+      <datalist id="savePathOptions"></datalist>
+      <button id="savePathDefault" class="ghost">设为默认</button>
       <button id="resetFilters" class="ghost">清空筛选</button>
       <button id="savePrefs" class="ghost">存为默认偏好</button>
     </div>
