@@ -10,12 +10,13 @@ import json
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from .config import Settings
 from .bangumi.client import BangumiClient, BangumiError
 from .nekobt.client import NekoBTClient, NekoBTError
 from .nekobt.media import (
+    HIGH_SIMILARITY,
     MediaCandidate,
     MediaSearchResult,
     classify_confidence,
@@ -179,59 +180,66 @@ def _year_from_date(value: Optional[str]) -> Optional[int]:
     return int(head) if head.isdigit() else None
 
 
-def _bridge_to_nekobt(ctx: ServiceContext, name: str) -> Optional[MediaCandidate]:
-    """用 Bangumi 的原名去 nekoBT 找对应媒体。
+def _bridge_to_nekobt(
+    ctx: ServiceContext, name: str, *, min_similarity: float = HIGH_SIMILARITY
+) -> Tuple[Optional[MediaCandidate], float]:
+    """用 Bangumi 的原名去 nekoBT 找对应媒体，返回 (候选, 最高相似度)。
 
     实测 6/6 精确命中：Bangumi 的 ``name`` 是日文原名，而 nekoBT 的索引里有
     AniList 的 ``native`` 字段，两边是对得上的。
+
+    **必须带相似度门槛**：nekoBT 没有这部作品时，它仍然会返回一堆无关结果
+    （实测《妄想学生会》最高只有 0.2857，第一名是《学生会也有洞》）。
+    早期版本直接取第一名，于是把用户导向了完全不同的作品。
     """
     if not name:
-        return None
+        return None, 0.0
 
     cache_key = f"bridge:{name}"
     cached = ctx.bridge_cache.get(cache_key)
     if cached:
-        return MediaCandidate(
-            media_id=str(cached.get("media_id") or ""),
-            title=cached.get("title") or name,
-            year=cached.get("year"),
-            similarity=float(cached.get("similarity") or 0.0),
-            anilist_id=cached.get("anilist_id"),
-            matched_by="bridge-cache",
+        cached_similarity = float(cached.get("similarity") or 0.0)
+        # 旧版本没有阈值判断，可能把「最像的一条」当成命中缓存了下来，
+        # 所以缓存读取也要过一遍门槛。
+        if cached_similarity < min_similarity:
+            return None, cached_similarity
+        return (
+            MediaCandidate(
+                media_id=str(cached.get("media_id") or ""),
+                title=cached.get("title") or name,
+                year=cached.get("year"),
+                similarity=cached_similarity,
+                anilist_id=cached.get("anilist_id"),
+                matched_by="bridge-cache",
+            ),
+            cached_similarity,
         )
 
     try:
         rows = ctx.nekobt.search_media(name, limit=3)
     except NekoBTError:
-        return None
+        return None, 0.0
     ranked = rank_candidates(rows)
-    best = ranked[0] if ranked else None
-    if best is not None and best.media_id:
-        ctx.bridge_cache.set(
-            cache_key,
-            {
-                "media_id": best.media_id,
-                "title": best.title,
-                "year": best.year,
-                "similarity": best.similarity,
-                "anilist_id": best.anilist_id,
-            },
-        )
-    return best
+    if not ranked:
+        return None, 0.0
 
+    best = ranked[0]
+    best_similarity = best.similarity
+    if not best.media_id or best_similarity < min_similarity:
+        # 宁可不给结果，也不拿一个别的作品顶替
+        return None, best_similarity
 
-def _bridge_many(ctx: ServiceContext, names: Sequence[str]) -> Dict[str, Optional[MediaCandidate]]:
-    """并行桥接多个条目。
-
-    串行时每次要等一个网络往返（实测 5 条 = 4.3s），并行后 2.3s。
-    """
-    unique = [name for name in dict.fromkeys(names) if name]
-    if not unique:
-        return {}
-    workers = min(len(unique), 8)
-    with ThreadPoolExecutor(max_workers=workers) as pool:
-        results = list(pool.map(lambda item: _bridge_to_nekobt(ctx, item), unique))
-    return dict(zip(unique, results))
+    ctx.bridge_cache.set(
+        cache_key,
+        {
+            "media_id": best.media_id,
+            "title": best.title,
+            "year": best.year,
+            "similarity": best.similarity,
+            "anilist_id": best.anilist_id,
+        },
+    )
+    return best, best_similarity
 
 
 def _media_detail(ctx: ServiceContext, media_id: str) -> Dict[str, Any]:
@@ -412,12 +420,19 @@ def bridge_candidate(ctx: ServiceContext, name: str) -> Dict[str, Any]:
     """
     if not name.strip():
         return {"ok": False, "error": "缺少条目原名，无法桥接"}
-    bridged = _bridge_to_nekobt(ctx, name.strip())
+    bridged, best_similarity = _bridge_to_nekobt(ctx, name.strip())
     if bridged is None or not bridged.media_id:
+        reason = (
+            f"nekoBT 没有这部作品（最接近的一条相似度只有 {best_similarity:.2f}，"
+            f"低于可信阈值 {HIGH_SIMILARITY}）。"
+            if best_similarity
+            else "nekoBT 里没有这部作品。"
+        )
         return {
             "ok": False,
             "media_id": None,
-            "error": "nekoBT 里没找到对应媒体（可能没有收录这部作品）",
+            "best_similarity": round(best_similarity, 4),
+            "error": reason + "可以换其它来源，或在 nekoBT 站内确认一下。",
         }
     return {
         "ok": True,

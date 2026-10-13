@@ -322,7 +322,38 @@ def test_bridge_endpoint_reports_failure(client, ctx):
     ctx.nekobt.media_rows = []
     body = client.post("/api/bridge", json={"name": "不存在的作品"}).json()
     assert body["ok"] is False
-    assert "没找到" in body["error"]
+    assert "没有这部作品" in body["error"]
+
+
+def test_bridge_rejects_low_similarity_match(client, ctx):
+    """nekoBT 没有这部作品时会返回一堆无关结果，不能拿第一名顶替。
+
+    实测《妄想学生会》在 nekoBT 的最高相似度只有 0.2857，而第一名是
+    《学生会也有洞》——早期版本直接取第一名，于是把用户导向了别的作品。
+    """
+    ctx.nekobt.media_rows = [
+        media_result("s12330", "Even the Student Council Has Its Holes!", 0.2857)
+    ]
+    body = client.post("/api/bridge", json={"name": "Seitokai Yakuindomo"}).json()
+
+    assert body["ok"] is False
+    assert body["media_id"] is None
+    assert body["best_similarity"] == 0.2857
+    assert "0.29" in body["error"]
+
+
+def test_bridge_ignores_stale_low_similarity_cache(client, ctx):
+    """旧版本可能已经把错误结果缓存下来了，读取缓存时也要过门槛。"""
+    ctx.bridge_cache.set(
+        "bridge:Seitokai Yakuindomo",
+        {"media_id": "s12330", "title": "Even the Student Council Has Its Holes!",
+         "similarity": 0.2857, "anilist_id": None},
+    )
+    body = client.post("/api/bridge", json={"name": "Seitokai Yakuindomo"}).json()
+
+    assert body["ok"] is False
+    assert body["media_id"] is None
+    assert body["best_similarity"] == 0.2857
 
 
 def test_bridge_endpoint_rejects_blank_name(client):
