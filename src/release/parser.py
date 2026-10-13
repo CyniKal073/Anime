@@ -208,5 +208,7 @@ def build_release(row: Dict[str, Any]) -> Release:
         video_type=_int(row.get("video_type")),
         hardsub=row.get("hardsub") if isinstance(row.get("hardsub"), bool) else parsed.hardsub,
         uploaded_at=_int(row.get("uploaded_at")),
+        origin=row.get("origin") or "nekobt",
+        torrent_url=row.get("torrent_url"),
         raw=row,
     )

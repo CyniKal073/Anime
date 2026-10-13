@@ -7,10 +7,13 @@ JSON 的普通字典，避免把业务逻辑写进路由或 CLI 里。
 from __future__ import annotations
 
 import json
+from urllib.parse import unquote
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
+
+import requests
 
 from .config import Settings
 from .bangumi.client import BangumiClient, BangumiError
@@ -26,6 +29,8 @@ from .nekobt.media import (
 from .qbittorrent.client import QBittorrentClient, QBittorrentError
 from .qbittorrent.launcher import ensure_running
 from .mkv.tools import MkvToolError, MkvTools
+from .mikan.client import MIKAN_SOURCE, MikanClient, MikanError
+from .net import build_session
 from .release.matcher import (
     FilterResult,
     ReleasePreferences,
@@ -47,6 +52,10 @@ BRIDGE_TTL = 7 * 24 * 3600
 SEARCH_TTL = 600
 
 
+class TorrentFetchError(RuntimeError):
+    """从外部来源下载 .torrent 失败。"""
+
+
 @dataclass
 class ServiceContext:
     settings: Settings
@@ -58,6 +67,7 @@ class ServiceContext:
     _bridge_cache: Optional[JsonCache] = field(default=None, repr=False)
     _search_cache: Optional[JsonCache] = field(default=None, repr=False)
     _mkv: Optional[MkvTools] = field(default=None, repr=False)
+    _mikan: Optional[MikanClient] = field(default=None, repr=False)
     #: 自检专用探针（短超时、不重试）；测试里可注入假实现
     nekobt_probe: Optional[Any] = None
     bangumi_probe: Optional[Any] = None
@@ -107,6 +117,15 @@ class ServiceContext:
         if self._mkv is None:
             self._mkv = MkvTools(self.settings.mkv_tools_dir)
         return self._mkv
+
+    @property
+    def mikan(self) -> MikanClient:
+        if self._mikan is None:
+            self._mikan = MikanClient(
+                timeout=min(self.settings.http_timeout * 2, 40.0),
+                user_agent=f"{self.settings.user_agent} (https://github.com/CyniKal073)",
+            )
+        return self._mikan
 
 
 def build_context(settings: Optional[Settings] = None) -> ServiceContext:
@@ -468,6 +487,26 @@ def calendar_view(ctx: ServiceContext, *, refresh: bool = False) -> Dict[str, An
     return {"ok": True, "source": "bangumi", "days": days}
 
 
+def _fetch_torrent(url: str, *, user_agent: str) -> Tuple[bytes, str]:
+    """自己把 .torrent 取回来（而不是让 qBittorrent 去拉）。
+
+    这样和 nekoBT 那条路径行为一致：拿到字节后统一以 multipart 上传，
+    避免依赖客户端自身的网络与 UA。
+    """
+    session = build_session()
+    try:
+        response = session.get(url, headers={"User-Agent": user_agent}, timeout=40)
+    except requests.RequestException as exc:
+        raise TorrentFetchError(f"下载种子失败：{exc}") from exc
+    if response.status_code >= 400:
+        raise TorrentFetchError(f"下载种子失败：HTTP {response.status_code}")
+    content = response.content
+    if not content.startswith(b"d"):
+        raise TorrentFetchError("返回的内容不是合法的 .torrent（可能拿到了错误页）")
+    filename = unquote(url.rsplit("/", 1)[-1]) or "release.torrent"
+    return content, filename
+
+
 # ---------------------------------------------------- 内封字幕（MKVToolNix）
 
 #: 列目录时认为「可能是视频」的扩展名
@@ -594,6 +633,9 @@ def releases_to_dict(release: Release) -> Dict[str, Any]:
         "leechers": release.leechers,
         "infohash": release.infohash,
         "media_id": release.media_id,
+        "source": release.source,
+        "origin": release.origin,
+        "torrent_url": release.torrent_url,
     }
 
 
@@ -626,7 +668,19 @@ def list_releases(
 ) -> Dict[str, Any]:
     prefs = prefs or load_preferences(ctx.store)
     releases = fetch_releases(ctx, media_id, limit=limit)
+    payload = _release_page(releases, prefs, sort, include_unknown)
+    payload["media_id"] = media_id
+    payload["source"] = "nekobt"
+    return payload
 
+
+def _release_page(
+    releases: Sequence[Release],
+    prefs: ReleasePreferences,
+    sort: str,
+    include_unknown: bool,
+) -> Dict[str, Any]:
+    """把一批 Release 变成前端的统一分页结构（nekoBT 与蜜柑共用）。"""
     # 没有任何偏好就不过滤，但仍按默认偏好排序
     filter_prefs = prefs if has_rules(prefs) else ReleasePreferences()
     rank_prefs = prefs if filter_prefs is prefs else default_preferences()
@@ -650,7 +704,6 @@ def list_releases(
         ]
 
     return {
-        "media_id": media_id,
         "total": len(releases),
         "counts": {
             "matched": len(filtered.matched),
@@ -663,10 +716,49 @@ def list_releases(
     }
 
 
+def mikan_releases(
+    ctx: ServiceContext,
+    title: str,
+    *,
+    prefs: Optional[ReleasePreferences] = None,
+    limit: int = 100,
+    sort: str = "preference",
+    include_unknown: bool = True,
+) -> Dict[str, Any]:
+    """从蜜柑按标题直接搜 Release。
+
+    和 nekoBT 不同，蜜柑没有「作品」这一层，只有标题检索，
+    所以这里跳过作品识别，直接返回分页结果（结构保持一致，前端可复用渲染）。
+    """
+    prefs = prefs or load_preferences(ctx.store)
+    try:
+        rows = ctx.mikan.search(title, limit=max(1, min(limit, 300)))
+    except MikanError as exc:
+        return {
+            "ok": False,
+            "source": MIKAN_SOURCE,
+            "query": title,
+            "error": str(exc),
+            "total": 0,
+            "counts": {"matched": 0, "unknown": 0, "excluded": 0},
+            "matched": [],
+            "unknown": [],
+            "excluded": [],
+        }
+    releases = [build_release(row) for row in rows]
+    payload = _release_page(releases, prefs, sort, include_unknown)
+    payload["ok"] = True
+    payload["source"] = MIKAN_SOURCE
+    payload["query"] = title
+    payload["neutral_sort"] = True  # RSS 里没有做种数，按做种排序没有意义
+    return payload
+
+
 def submit_download(
     ctx: ServiceContext,
-    torrent_id: str,
+    torrent_id: Optional[str] = None,
     *,
+    torrent_url: Optional[str] = None,
     paused: bool = False,
     infohash: Optional[str] = None,
     title: Optional[str] = None,
@@ -681,7 +773,14 @@ def submit_download(
         raise QBittorrentError(ready.get("error") or "qBittorrent 未就绪")
     launched = bool(ready.get("launched"))
 
-    content, filename = ctx.nekobt.download_torrent(torrent_id, public=True)
+    # 两种取种子的方式：nekoBT 用 torrent_id 走它的下载接口；
+    # 蜜柑这类来源直接给 .torrent 直链，我们自己取回来再交给客户端。
+    if torrent_url:
+        content, filename = _fetch_torrent(torrent_url, user_agent=settings.user_agent)
+    elif torrent_id:
+        content, filename = ctx.nekobt.download_torrent(torrent_id, public=True)
+    else:
+        raise TorrentFetchError("必须提供 torrent_id（nekoBT）或 torrent_url（其它来源）")
     target = save_path or settings.qbit_savepath
 
     ctx.qbit.add_torrent(
@@ -705,7 +804,7 @@ def submit_download(
             torrent_hash = None
 
     ctx.store.record_download(
-        torrent_id=torrent_id,
+        torrent_id=torrent_id or torrent_url or "",
         torrent_hash=torrent_hash or infohash,
         title=title or filename,
         save_path=target,

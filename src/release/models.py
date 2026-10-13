@@ -113,6 +113,10 @@ class Release:
     video_type: Optional[int] = None
     hardsub: Optional[bool] = None
     uploaded_at: Optional[int] = None
+    #: 数据来自哪个站（nekobt / mikan）。注意不要和上面的 `source`（BDRip/WEB-DL 这种片源类型）混淆。
+    origin: str = "nekobt"
+    #: 非 nekoBT 来源直接给的 .torrent 直链
+    torrent_url: Optional[str] = None
     raw: Dict[str, Any] = field(default_factory=dict)
 
     def has_subtitle(self, lang: str) -> bool:

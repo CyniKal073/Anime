@@ -87,6 +87,11 @@
     <div class="search-row">
       <!-- 搜索输入框。placeholder 是提示文字，可改；id="q" 不要改 -->
       <input id="q" type="search" placeholder="输入动漫名称，例如：败犬女主太多了！" autocomplete="off">
+      <!-- 搜索来源：nekoBT 新番更新最快（默认）；蜜柑是中文站，用来补老片源 -->
+      <select id="sourceSelect" title="搜索来源">
+        <option value="nekobt">nekoBT（新番）</option>
+        <option value="mikan">蜜柑（老片源）</option>
+      </select>
       <!-- 搜索按钮，文字可改 -->
       <button id="searchBtn" class="primary">搜索</button>
     </div>

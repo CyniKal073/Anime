@@ -23,6 +23,7 @@ from ..qbittorrent.client import QBittorrentError
 from ..release.matcher import ReleasePreferences, default_preferences
 from ..service import (
     ServiceContext,
+    TorrentFetchError,
     bridge_candidate,
     build_context,
     calendar_view,
@@ -31,6 +32,7 @@ from ..service import (
     list_library,
     list_releases,
     load_preferences,
+    mikan_releases,
     preferences_from_dict,
     preferences_to_dict,
     resolve_work,
@@ -55,7 +57,9 @@ def get_context() -> ServiceContext:
 
 
 class DownloadRequest(BaseModel):
-    torrent_id: str
+    #: nekoBT 路径用 torrent_id；蜜柑这类来源直接给 .torrent 直链
+    torrent_id: Optional[str] = None
+    torrent_url: Optional[str] = None
     infohash: Optional[str] = None
     title: Optional[str] = None
     paused: bool = False
@@ -188,13 +192,14 @@ def create_app() -> FastAPI:
             return submit_download(
                 ctx,
                 req.torrent_id,
+                torrent_url=req.torrent_url,
                 paused=req.paused,
                 infohash=req.infohash,
                 title=req.title,
             )
         except ConfigError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        except (NekoBTError, QBittorrentError) as exc:
+        except (NekoBTError, QBittorrentError, TorrentFetchError) as exc:
             raise HTTPException(status_code=502, detail=str(exc)) from exc
 
     @app.get("/api/downloads")
@@ -204,6 +209,49 @@ def create_app() -> FastAPI:
     ) -> Dict[str, Any]:
         rows = ctx.store.list_downloads(max(1, min(limit, 200)))
         return {"items": [dict(row) for row in rows]}
+
+    @app.get("/api/mikan/releases")
+    def api_mikan_releases(
+        title: str,
+        resolution: List[str] = Query(default=[]),
+        source: List[str] = Query(default=[]),
+        codec: List[str] = Query(default=[]),
+        sub_lang: List[str] = Query(default=[]),
+        batch: Optional[bool] = None,
+        min_seeders: Optional[int] = None,
+        limit: int = 100,
+        sort: str = "preference",
+        include_unknown: bool = True,
+        ctx: ServiceContext = Depends(get_context),
+    ) -> Dict[str, Any]:
+        """蜜柑（老片源补充）：按标题直接搜 Release，没有作品识别这一步。
+
+        返回结构与 nekoBT 的 /api/media/{id}/releases 一致，前端可复用渲染。
+        """
+        if not title.strip():
+            raise HTTPException(status_code=400, detail="title 不能为空")
+        provided = any(
+            [resolution, source, codec, sub_lang, batch is not None, min_seeders is not None]
+        )
+        if provided:
+            prefs = ReleasePreferences(
+                resolutions=list(resolution),
+                sources=list(source),
+                video_codecs=list(codec),
+                sub_langs=list(sub_lang),
+                require_batch=batch,
+                min_seeders=min_seeders,
+            )
+        else:
+            prefs = load_preferences(ctx.store)
+        return mikan_releases(
+            ctx,
+            title,
+            prefs=prefs,
+            limit=max(1, min(limit, 300)),
+            sort=sort,
+            include_unknown=include_unknown,
+        )
 
     @app.get("/api/calendar")
     def api_calendar(

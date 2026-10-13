@@ -16,6 +16,9 @@ const state = {
   candidates: [],
   selected: null,
   searchMeta: null,
+  //: 搜索来源：nekobt / mikan（注意与下方 active.source 区分，后者是 BDRip 这类片源类型）
+  source: "nekobt",
+  searchTitle: "",
   data: null,
   tab: "matched",
   active: { resolution: [], source: [], codec: [], sub_lang: [] },
@@ -176,9 +179,23 @@ function calendarItem(item) {
 async function doSearch() {
   const title = $("q").value.trim();
   if (!title) { toast("请输入动漫名称"); return; }
+  state.searchTitle = title;
+  state.source = ($("sourceSelect") && $("sourceSelect").value) || "nekobt";
+  localStorage.setItem("searchSource", state.source);
   const btn = $("searchBtn");
   btn.disabled = true; btn.textContent = "搜索中…";
   try {
+    if (state.source === "mikan") {
+      // 蜜柑没有「作品识别」这一步：按标题直接搜 Release
+      state.candidates = [];
+      state.selected = null;
+      state.searchMeta = null;
+      $("candidatesCard").classList.add("hidden");
+      $("filtersCard").classList.remove("hidden");
+      $("searchHint").textContent = `来源：蜜柑（中文站，偏老片源） · 标题检索「${title}」`;
+      await loadReleases();
+      return;
+    }
     const r = await api("/api/search?title=" + encodeURIComponent(title));
     state.candidates = r.candidates || [];
     state.searchMeta = r;
@@ -362,13 +379,24 @@ function buildQuery() {
 }
 
 async function loadReleases() {
-  if (!state.selected) return;
   const card = $("resultsCard");
   card.classList.remove("hidden");
   card.querySelector("tbody").innerHTML = '<tr><td colspan="10" class="empty">加载中…</td></tr>';
   try {
-    const qs = state.selected.media_id + "/releases?" + buildQuery().toString();
-    const r = await api("/api/media/" + qs);
+    let r;
+    if (state.source === "mikan") {
+      if (!state.searchTitle) return;
+      r = await api(
+        "/api/mikan/releases?title=" +
+          encodeURIComponent(state.searchTitle) +
+          "&" +
+          buildQuery().toString()
+      );
+      if (r.ok === false) toast("蜜柑搜索失败：" + (r.error || ""), "bad");
+    } else {
+      if (!state.selected) return;
+      r = await api("/api/media/" + state.selected.media_id + "/releases?" + buildQuery().toString());
+    }
     state.data = r;
     renderResults();
   } catch (err) {
@@ -458,7 +486,8 @@ async function doDownload(rel, btn) {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        torrent_id: rel.torrent_id,
+        torrent_id: rel.torrent_id || null,
+        torrent_url: rel.torrent_url || null,
         infohash: rel.infohash,
         title: rel.title,
         paused: $("pausedAdd").checked,
@@ -545,6 +574,9 @@ window.addEventListener("DOMContentLoaded", () => {
   loadLibrary();
   loadHistory();
   $("historyCard").classList.remove("hidden");
+  // 恢复上次选择的搜索来源
+  const savedSource = localStorage.getItem("searchSource");
+  if (savedSource && $("sourceSelect")) $("sourceSelect").value = savedSource;
   $("searchBtn").onclick = doSearch;
   $("q").addEventListener("keydown", (e) => { if (e.key === "Enter") doSearch(); });
   $("batch").onchange = loadReleases;
