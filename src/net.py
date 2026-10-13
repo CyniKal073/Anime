@@ -14,6 +14,7 @@ Python 的 socket 会按 ``getaddrinfo`` 返回顺序取第一个地址，正好
 
 from __future__ import annotations
 
+import os
 import socket
 import threading
 from typing import Any, Optional
@@ -23,6 +24,61 @@ from requests.adapters import HTTPAdapter
 from urllib3.connection import HTTPSConnection
 from urllib3.connectionpool import HTTPSConnectionPool
 from urllib3.poolmanager import PoolManager
+
+#: 本机地址不经过代理
+NO_PROXY_HOSTS = "localhost,127.0.0.1,::1"
+
+#: Windows 系统代理的注册表位置
+_WININET_KEY = r"Software\Microsoft\Windows\CurrentVersion\Internet Settings"
+
+
+def detect_system_proxy() -> Optional[str]:
+    """读取 Windows 系统代理（IE/WinINET 设置）。
+
+    为什么需要它：很多代理客户端（v2rayN、Clash 等）工作在**系统代理**模式下，
+    浏览器会自动走它，但 requests / curl **不读注册表**，只看环境变量。
+    结果就是「浏览器能打开、程序连不上」——实测 rutracker、蜜柑、api.bgm.tv
+    直连全部不可达，走系统代理后全部 200。
+    """
+    # 显式覆盖优先：.env 里的 ANIME_PROXY 可以指定别的代理；
+    # 设成空字符串就表示强制直连。
+    override = os.environ.get("ANIME_PROXY")
+    if override is not None:
+        return override.strip() or None
+
+    try:
+        import winreg  # type: ignore
+    except ImportError:  # pragma: no cover - 非 Windows
+        return None
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, _WININET_KEY) as key:
+            enabled, _ = winreg.QueryValueEx(key, "ProxyEnable")
+            server, _ = winreg.QueryValueEx(key, "ProxyServer")
+    except OSError:
+        return None
+    if not enabled or not server:
+        return None
+
+    server = str(server).strip()
+    # 形如 "http=host:port;https=host:port" 时优先取 https
+    if "=" in server:
+        parts = dict(item.split("=", 1) for item in server.split(";") if "=" in item)
+        server = parts.get("https") or parts.get("http") or ""
+    if not server:
+        return None
+    if not server.startswith(("http://", "https://", "socks5://", "socks4://")):
+        server = "http://" + server
+    return server
+
+
+def apply_proxy(session: Any, proxy: Optional[str]) -> None:
+    """给会话装上代理，并显式忽略环境变量。
+
+    忽略环境变量是必要的：沙箱会给进程注入一个黑洞代理（127.0.0.1:9），
+    不关掉的话请求会被导去那里。
+    """
+    session.trust_env = False
+    session.proxies = {"http": proxy, "https": proxy} if proxy else {}
 
 #: 记住每个主机实际可用的地址族，避免每次请求都先等一遍不可用的那个。
 #: 实测有些网络下 IPv6 是通的（nekobt.to），有些反过来，所以不能写死。
@@ -117,8 +173,12 @@ class IPv6FirstAdapter(HTTPAdapter):
         }
 
 
-def build_session() -> requests.Session:
-    """构造默认会话：HTTPS 走 IPv6 优先，HTTP 保持原样。"""
+def build_session(proxy: Optional[str] = None) -> requests.Session:
+    """构造默认会话：自动走系统代理（若开着），HTTPS 地址族自适应。
+
+    ``proxy`` 传空字符串表示「强制不使用代理」，传 None 表示自动探测。
+    """
     session = requests.Session()
     session.mount("https://", IPv6FirstAdapter())
+    apply_proxy(session, detect_system_proxy() if proxy is None else proxy)
     return session

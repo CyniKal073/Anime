@@ -42,6 +42,8 @@ class QBittorrentClient:
         self.username = username
         self.password = password
         self.session = session if session is not None else requests.Session()
+        # 本地服务绝不能走代理（用户的系统代理可能是全局模式）
+        self.session.trust_env = False
         self.timeout = timeout
         self._logged_in = False
 

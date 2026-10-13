@@ -11,6 +11,8 @@ from typing import Any, Dict, List, Optional
 
 import requests
 
+from ..net import build_session
+
 
 class BangumiError(RuntimeError):
     pass
@@ -32,7 +34,8 @@ class BangumiClient:
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.user_agent = user_agent
-        self.session = session if session is not None else requests.Session()
+        # 走系统代理：api.bgm.tv 直连会被污染，必须和浏览器一样走代理
+        self.session = session if session is not None else build_session()
         self.timeout = timeout
         self.availability_ttl = availability_ttl
         self._available: Optional[bool] = None
