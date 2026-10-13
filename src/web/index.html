@@ -148,17 +148,36 @@
       <label class="check">
         <input id="pausedAdd" type="checkbox"> 添加到客户端后暂停
       </label>
-      <!-- 保存目录：本次下载用它；点「设为默认」写进本地设置（不改 .env）。
-           输入框支持自动补全：默认目录、它的子文件夹、以及历史下载用过的目录 -->
+      <!-- 保存目录：点一下弹窗逐层挑目录；「设为默认」写进本地设置（不改 .env） -->
       <label>保存到
-        <input id="savePath" list="savePathOptions" placeholder="留空 = 用默认目录">
+        <button id="savePathBtn" type="button" class="path-button" title="点击选择目录">默认目录</button>
       </label>
-      <datalist id="savePathOptions"></datalist>
       <button id="savePathDefault" class="ghost">设为默认</button>
       <button id="resetFilters" class="ghost">清空筛选</button>
       <button id="savePrefs" class="ghost">存为默认偏好</button>
     </div>
   </section>
+
+  <!-- ======================================================================
+       保存目录选择弹窗
+       点「保存到」打开；可以逐层进目录，也可以直接手输路径。
+       行末的 ▸ 是「进入这个文件夹」，点名字则是「就选这个」。
+       ====================================================================== -->
+  <dialog id="pathDialog" class="path-dialog">
+    <div class="pd-head">
+      <span class="pd-title">选择保存目录</span>
+      <button id="pathUp" class="ghost small" type="button">上一级</button>
+    </div>
+    <div class="pd-path" id="pathCurrent"></div>
+    <div class="pd-drives" id="pathDrives"></div>
+    <div class="pd-list" id="pathList"></div>
+    <div class="pd-foot">
+      <input id="pathManual" type="text" placeholder="也可以直接粘贴完整路径">
+      <button id="pathUseManual" class="ghost" type="button">用这个路径</button>
+      <button id="pathUseCurrent" class="primary" type="button">选当前目录</button>
+      <button id="pathCancel" class="ghost" type="button">取消</button>
+    </div>
+  </dialog>
 
   <!-- ======================================================================
        [5] Release 结果

@@ -13,6 +13,8 @@ const SUB_LABEL = { "zh-hans": "简中", "zh-hant": "繁中", "en": "英文" };
 const SOURCE_LABEL = { cache: "本地缓存", bangumi: "Bangumi", nekobt: "nekoBT 模糊搜索" };
 
 const state = {
+  savePath: "",      // 本次下载用的目录，空 = 用默认
+  defaultPath: "",   // 服务端的默认目录
   candidates: [],
   selected: null,
   searchMeta: null,
@@ -490,7 +492,7 @@ async function doDownload(rel, btn) {
         torrent_url: rel.torrent_url || null,
         infohash: rel.infohash,
         title: rel.title,
-        save_path: ($("savePath") && $("savePath").value.trim()) || null,
+        save_path: state.savePath || null,
         paused: $("pausedAdd").checked,
       }),
     });
@@ -597,51 +599,137 @@ window.addEventListener("DOMContentLoaded", () => {
   $("subMerge").onclick = mergeSubtitles;
   loadDownloadPath();
   $("savePathDefault").onclick = saveDownloadPathAsDefault;
-  $("savePath").onchange = () => localStorage.setItem("savePath", $("savePath").value.trim());
+  $("savePathBtn").onclick = openPathDialog;
+  $("pathUseCurrent").onclick = () => chooseSavePath(browsePath);
+  $("pathUseManual").onclick = () => chooseSavePath($("pathManual").value.trim());
+  $("pathCancel").onclick = () => $("pathDialog").close();
 });
 
 /* ------------------------------------------------------------ 下载目录 */
+/*
+  「保存到」是一个弹窗选择器：
+  · 点「保存到」→ GET /api/browse 逐层列目录
+  · 点文件夹名 = 就选它；点行末 ▸ = 进入这个文件夹
+  · 也能直接粘贴完整路径
+  选中的路径存在 state.savePath（空 = 用默认目录），并记在 localStorage。
+*/
+
+let browsePath = "";
 
 async function loadDownloadPath() {
   try {
     const r = await api("/api/download-path");
-    const options = $("savePathOptions");
-    options.innerHTML = "";
-    (r.suggestions || []).forEach((item) => {
-      const option = document.createElement("option");
-      option.value = item;
-      options.appendChild(option);
-    });
-    // 优先用上次手填的，其次用服务端的默认
-    const remembered = localStorage.getItem("savePath");
-    $("savePath").value = remembered || r.path || "";
-    $("savePath").title =
-      r.source === "custom" ? `默认目录（界面设置）：${r.path}` : `默认目录（.env）：${r.path}`;
+    state.defaultPath = r.path || "";
+    state.savePath = localStorage.getItem("savePath") || "";
+    updateSavePathButton();
+    $("pathManual").placeholder = r.path || "";
   } catch (err) {
-    /* 拿不到就用空值，下载时交给后端兜底 */
+    /* 拿不到就用默认，提交时后端兜底 */
   }
 }
 
+function updateSavePathButton() {
+  const btn = $("savePathBtn");
+  if (!btn) return;
+  btn.textContent = state.savePath || `默认（${state.defaultPath || "..."}）`;
+  btn.title = state.savePath || state.defaultPath || "";
+}
+
 async function saveDownloadPathAsDefault() {
-  const path = $("savePath").value.trim();
   try {
     const r = await api("/api/download-path", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ path }),
+      body: JSON.stringify({ path: state.savePath || "" }),
     });
-    localStorage.setItem("savePath", r.path || "");
-    $("savePath").value = r.path || "";
+    state.defaultPath = r.path || "";
+    state.savePath = "";
+    localStorage.setItem("savePath", "");
+    updateSavePathButton();
     toast(
-      r.source === "custom"
-        ? `默认保存目录已改为：${r.path}`
-        : `已恢复为 .env 里的默认目录：${r.path}`,
+      r.source === "custom" ? `默认保存目录已改为：${r.path}` : `已恢复默认目录：${r.path}`,
       "ok"
     );
-    loadDownloadPath();
   } catch (err) {
     toast("设置失败：" + err.message, "bad");
   }
+}
+
+async function openPathDialog() {
+  $("pathManual").value = "";
+  await browseTo(state.savePath || state.defaultPath || "");
+  $("pathDialog").showModal();
+}
+
+async function browseTo(path) {
+  try {
+    const r = await api("/api/browse" + (path ? "?path=" + encodeURIComponent(path) : ""));
+    if (!r.ok) {
+      toast("无法打开：" + (r.error || ""), "bad");
+      return;
+    }
+    browsePath = r.path;
+    renderBrowse(r);
+  } catch (err) {
+    toast("浏览失败：" + err.message, "bad");
+  }
+}
+
+function renderBrowse(r) {
+  $("pathCurrent").textContent = r.path;
+  const up = $("pathUp");
+  up.disabled = !r.parent;
+  up.onclick = () => r.parent && browseTo(r.parent);
+
+  const drives = $("pathDrives");
+  drives.innerHTML = "";
+  (r.drives || []).forEach((drive) => {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "ghost small";
+    btn.textContent = drive;
+    btn.onclick = () => browseTo(drive);
+    drives.appendChild(btn);
+  });
+
+  const list = $("pathList");
+  list.innerHTML = "";
+  if (!(r.dirs || []).length) {
+    const empty = document.createElement("div");
+    empty.className = "empty";
+    empty.textContent = "（没有子文件夹，可直接点「选当前目录」）";
+    list.appendChild(empty);
+  }
+  (r.dirs || []).forEach((dir) => {
+    const row = document.createElement("div");
+    row.className = "pd-row";
+    const name = document.createElement("button");
+    name.type = "button";
+    name.className = "pd-name";
+    name.textContent = dir.name;
+    name.title = "就选这个：" + dir.path;
+    name.onclick = () => chooseSavePath(dir.path);
+    const enter = document.createElement("button");
+    enter.type = "button";
+    enter.className = "ghost small";
+    enter.textContent = "▸";
+    enter.title = "进入这个文件夹";
+    enter.onclick = (event) => {
+      event.stopPropagation();
+      browseTo(dir.path);
+    };
+    row.appendChild(name);
+    row.appendChild(enter);
+    list.appendChild(row);
+  });
+}
+
+function chooseSavePath(path) {
+  state.savePath = path || "";
+  localStorage.setItem("savePath", state.savePath);
+  updateSavePathButton();
+  const dialog = $("pathDialog");
+  if (dialog && dialog.open) dialog.close();
 }
 
 /* ------------------------------------------------------------ 字幕合并 */

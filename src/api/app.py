@@ -25,6 +25,7 @@ from ..service import (
     ServiceContext,
     TorrentFetchError,
     bridge_candidate,
+    browse_directories,
     build_context,
     calendar_view,
     confirm_mapping,
@@ -234,6 +235,14 @@ def create_app() -> FastAPI:
             return set_download_path(ctx, req.path)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.get("/api/browse")
+    def api_browse(
+        path: Optional[str] = None,
+        ctx: ServiceContext = Depends(get_context),
+    ) -> Dict[str, Any]:
+        """列出目录下的子文件夹，供下载位置的弹窗逐层挑选。"""
+        return browse_directories(ctx, path)
 
     @app.get("/api/mikan/releases")
     def api_mikan_releases(

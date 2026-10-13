@@ -126,6 +126,63 @@ def set_download_path(ctx: ServiceContext, path: str) -> Dict[str, Any]:
     return {"ok": True, "path": cleaned, "source": "custom"}
 
 
+def _list_drives() -> List[str]:
+    """Windows 上可用的盘符（非 Windows 会自然返回空）。"""
+    drives: List[str] = []
+    for letter in "CDEFGHIJ":
+        root = f"{letter}:\\"
+        try:
+            if Path(root).exists():
+                drives.append(root)
+        except OSError:
+            continue
+    return drives
+
+
+def browse_directories(ctx: ServiceContext, path: Optional[str] = None) -> Dict[str, Any]:
+    """列出某个目录下的子文件夹，供弹窗里逐层选择。"""
+    try:
+        target = Path(path) if path else Path(effective_save_path(ctx))
+    except (TypeError, ValueError):
+        return {"ok": False, "error": "路径无效"}
+
+    if not target.is_dir():
+        return {
+            "ok": False,
+            "path": str(target),
+            "error": f"目录不存在：{target}",
+            "drives": _list_drives(),
+        }
+
+    dirs: List[Dict[str, str]] = []
+    try:
+        for item in sorted(target.iterdir(), key=lambda p: p.name.lower()):
+            if item.name.startswith(".") or not item.is_dir():
+                continue
+            dirs.append({"name": item.name, "path": str(item)})
+            if len(dirs) >= 200:
+                break
+    except OSError as exc:
+        return {
+            "ok": False,
+            "path": str(target),
+            "error": f"无法读取目录：{exc}",
+            "drives": _list_drives(),
+        }
+
+    parent = target.parent
+    return {
+        "ok": True,
+        "path": str(target),
+        "name": target.name or str(target),
+        "parent": str(parent) if parent != target else None,
+        "dirs": dirs,
+        "is_default": str(target) == effective_save_path(ctx),
+        "env_path": ctx.settings.qbit_savepath,
+        "drives": _list_drives(),
+    }
+
+
 @dataclass
 class ServiceContext:
     settings: Settings
