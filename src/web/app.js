@@ -33,6 +33,12 @@ async function api(path, options) {
   let body = null;
   try { body = await res.json(); } catch (e) { /* 非 JSON */ }
   if (!res.ok) {
+    // 404 基本都是「服务还是旧代码」——把话说明白，别让人猜
+    if (res.status === 404) {
+      throw new Error(
+        "接口不存在（服务可能是旧版本）。请重启服务：关掉终端里的进程，重新运行 .\\run_web.ps1 -Reload"
+      );
+    }
     const detail = body && body.detail ? body.detail : res.status + " " + res.statusText;
     throw new Error(detail);
   }

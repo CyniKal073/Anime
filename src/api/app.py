@@ -489,6 +489,12 @@ def main() -> int:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
     parser.add_argument("--reload", action="store_true")
+    parser.add_argument(
+        "--reload-dir",
+        action="append",
+        default=[],
+        help="热重载只监听这些目录（默认监听整个工作目录，会被 data/ 写入频繁触发）",
+    )
     parser.add_argument("--no-access-log", action="store_true", help="关闭每条请求的访问日志")
     args = parser.parse_args()
 
@@ -509,6 +515,7 @@ def main() -> int:
         host=args.host,
         port=args.port,
         reload=args.reload,
+        reload_dirs=args.reload_dir or None,
         log_level="info",
         use_colors=False,
         access_log=not args.no_access_log,

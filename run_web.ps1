@@ -30,7 +30,10 @@ $env:PYTHONIOENCODING = "utf-8"
 
 $arguments = @("-m", "src.api.app", "--host", $Addr, "--port", "$Port")
 if ($NoAccessLog) { $arguments += "--no-access-log" }
-if ($Reload) { $arguments += "--reload" }
+if ($Reload) {
+    # 只监听 src/：整个目录的话，data/ 里数据库和日志一写就会触发重载
+    $arguments += @("--reload", "--reload-dir", "src")
+}
 
 Write-Host "启动 Web UI: http://${Addr}:${Port}" -ForegroundColor Cyan
 python @arguments
