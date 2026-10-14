@@ -21,6 +21,8 @@ const state = {
   //: 搜索来源：nekobt / mikan（注意与下方 active.source 区分，后者是 BDRip 这类片源类型）
   source: "nekobt",
   searchTitle: "",
+  assrtQuery: "",
+  assrtCount: 0,
   data: null,
   tab: "matched",
   active: { resolution: [], source: [], codec: [], sub_lang: [] },
@@ -630,6 +632,7 @@ window.addEventListener("DOMContentLoaded", () => {
   $("pathUseManual").onclick = () => chooseSavePath($("pathManual").value.trim());
   $("pathCancel").onclick = () => $("pathDialog").close();
   $("assrtSearch").onclick = searchAssrt;
+  $("assrtMore").onclick = loadMoreAssrt;
   $("batchCancel").onclick = () => $("batchDialog").close();
   $("batchLoadVideos").onclick = loadBatchVideos;
   $("batchRun").onclick = runBatchEmbed;
@@ -807,11 +810,7 @@ async function searchAssrt() {
   $("assrtHint").textContent = "检索中…";
   box.innerHTML = "";
   try {
-    const r = await api("/api/subtitle/search", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ query, count: 15 }),
-    });
+    const r = await fetchAssrt(query, 0);
     if (!r.ok) {
       $("assrtHint").textContent = "";
       toast(r.configured === false ? r.error : "检索失败：" + (r.error || ""), "bad");
@@ -819,6 +818,10 @@ async function searchAssrt() {
     }
     const items = r.items || [];
     $("assrtHint").textContent = `共 ${items.length} 条`;
+    state.assrtQuery = query;
+    state.assrtCount = items.length;
+    // 接口单次上限 15 条，刚好满就说明后面可能还有
+    $("assrtMore").classList.toggle("hidden", items.length < 15);
     if (!items.length) {
       toast("射手网没搜到字幕");
       return;
@@ -827,6 +830,40 @@ async function searchAssrt() {
   } catch (err) {
     $("assrtHint").textContent = "";
     toast("检索失败：" + err.message, "bad");
+  }
+}
+
+async function fetchAssrt(query, pos) {
+  return api("/api/subtitle/search", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ query, count: 15, pos }),
+  });
+}
+
+/** 单次最多 15 条，靠 pos 往下翻。 */
+async function loadMoreAssrt() {
+  if (!state.assrtQuery) return;
+  const btn = $("assrtMore");
+  btn.disabled = true;
+  btn.textContent = "加载中…";
+  try {
+    const r = await fetchAssrt(state.assrtQuery, state.assrtCount);
+    if (!r.ok) {
+      toast("加载失败：" + (r.error || ""), "bad");
+      return;
+    }
+    const items = r.items || [];
+    items.forEach((item) => $("assrtResults").appendChild(assrtRow(item)));
+    state.assrtCount += items.length;
+    $("assrtHint").textContent = `已加载 ${state.assrtCount} 条`;
+    btn.classList.toggle("hidden", items.length < 15);
+    if (!items.length) toast("没有更多结果了");
+  } catch (err) {
+    toast("加载失败：" + err.message, "bad");
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "加载更多";
   }
 }
 
@@ -850,6 +887,22 @@ function assrtRow(item) {
   ].filter(Boolean).join(" · ");
   info.appendChild(title);
   info.appendChild(meta);
+
+  // 把接口给的其余信息也摊开：别的名字、修订版、下载/浏览数
+  const extra = [];
+  const aliases = [item.native_name, item.videoname, item.sub_name].filter(
+    (name) => name && name !== item.title
+  );
+  if (aliases.length) extra.push("别名：" + Array.from(new Set(aliases)).join(" / "));
+  if (item.revision) extra.push(`修订 ${item.revision}`);
+  if (item.down_count) extra.push(`下载 ${item.down_count}`);
+  if (item.view_count) extra.push(`浏览 ${item.view_count}`);
+  if (extra.length) {
+    const more = document.createElement("div");
+    more.className = "a-meta";
+    more.textContent = extra.join(" · ");
+    info.appendChild(more);
+  }
   row.appendChild(info);
 
   const btn = document.createElement("button");

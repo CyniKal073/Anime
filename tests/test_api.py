@@ -498,16 +498,17 @@ def test_videos_endpoint_tolerates_quoted_path(client, tmp_path):
     assert [item["name"] for item in body["files"]] == ["E01.mkv"]
 
 
-def test_videos_endpoint_only_lists_mkv(client, tmp_path):
+def test_videos_endpoint_only_lists_current_folder(client, tmp_path):
+    """只看当前层：BD 资源的子目录里常有特典/NCOP，列出来只会添乱。"""
     (tmp_path / "E01.mkv").write_bytes(b"x")
     (tmp_path / "cover.jpg").write_bytes(b"x")
     (tmp_path / "sub.ass").write_text("x", encoding="utf-8")
-    nested = tmp_path / "Season 2"
+    nested = tmp_path / "Extras"
     nested.mkdir()
-    (nested / "E02.mkv").write_bytes(b"x")
+    (nested / "NCOP.mkv").write_bytes(b"x")
 
     body = client.get("/api/videos", params={"path": str(tmp_path)}).json()
-    assert sorted(item["name"] for item in body["files"]) == ["E01.mkv", "E02.mkv"]
+    assert [item["name"] for item in body["files"]] == ["E01.mkv"]
 
 
 def test_videos_endpoint_reports_missing_dir_clearly(client, tmp_path):

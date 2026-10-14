@@ -82,6 +82,7 @@ class DownloadPathRequest(BaseModel):
 class SubtitleSearchRequest(BaseModel):
     query: str
     count: int = 15
+    pos: int = 0
 
 
 class SubtitleEmbedRequest(BaseModel):
@@ -374,7 +375,7 @@ def create_app() -> FastAPI:
         """在射手网检索字幕。未配置 token 时返回 configured=false，不报错。"""
         if not req.query.strip():
             raise HTTPException(status_code=400, detail="query 不能为空")
-        return assrt_search(ctx, req.query, count=req.count)
+        return assrt_search(ctx, req.query, count=req.count, pos=max(0, req.pos))
 
     @app.post("/api/subtitle/embed")
     def api_subtitle_embed(
@@ -407,8 +408,11 @@ def create_app() -> FastAPI:
         path: Optional[str] = None,
         ctx: ServiceContext = Depends(get_context),
     ) -> Dict[str, Any]:
-        """列出某个文件夹下的视频文件（只认 mkv，供批量嵌入选片用）。"""
-        result = list_library(ctx, path, suffixes=(".mkv",))
+        """列出某个文件夹**当前层**的视频文件（只认 mkv，不看子目录）。
+
+        BD 资源的子目录里常有特典、NCOP 等别的视频，递归进来只会添乱。
+        """
+        result = list_library(ctx, path, suffixes=(".mkv",), recursive=False)
         result["dir"] = result.pop("root", None)
         return result
 

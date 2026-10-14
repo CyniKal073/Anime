@@ -661,8 +661,14 @@ ASSRT_LANG_LABEL = {
 }
 
 
-def assrt_search(ctx: ServiceContext, query: str, *, count: int = 15) -> Dict[str, Any]:
-    """在射手网搜字幕。"""
+def assrt_search(
+    ctx: ServiceContext, query: str, *, count: int = 15, pos: int = 0
+) -> Dict[str, Any]:
+    """在射手网搜字幕。
+
+    接口单次最多返回 15 条（文档写明的 cnt 上限），网站上看到更多是因为它分页。
+    要拿后面的结果就调 pos——界面的「加载更多」走的就是这条路。
+    """
     if not ctx.assrt.is_configured():
         return {
             "ok": False,
@@ -671,14 +677,14 @@ def assrt_search(ctx: ServiceContext, query: str, *, count: int = 15) -> Dict[st
             "error": "未配置射手网 token：请到 assrt.net 登录后获取，填进 .env 的 ASSRT_TOKEN",
         }
     try:
-        items = ctx.assrt.search(query, count=max(1, min(count, 30)))
+        items = ctx.assrt.search(query, count=max(1, min(count, 30)), page=max(0, pos))
     except AssrtError as exc:
         return {"ok": False, "configured": True, "items": [], "error": str(exc)}
     for item in items:
         item["lang_label"] = " / ".join(
             ASSRT_LANG_LABEL.get(code, code) for code in (item.get("langs") or [])
         )
-    return {"ok": True, "configured": True, "query": query, "items": items}
+    return {"ok": True, "configured": True, "query": query, "pos": pos, "items": items}
 
 
 def embed_subtitle(
@@ -867,6 +873,7 @@ def list_library(
     *,
     limit: int = 300,
     suffixes: Optional[Sequence[str]] = None,
+    recursive: bool = True,
 ) -> Dict[str, Any]:
     """列出下载目录里的视频文件，供字幕工具选择。"""
     # 同上：粘贴来的路径可能带引号
@@ -877,7 +884,10 @@ def list_library(
 
     wanted = tuple(s.lower() for s in suffixes) if suffixes else VIDEO_SUFFIXES
     files: List[Dict[str, Any]] = []
-    for item in sorted(root.rglob("*")):
+    # 批量嵌入只看当前目录：BD 资源的子目录里往往还有特典、NCOP 之类的其它视频，
+    # 递归进来会把它们一起列出，反而添乱。
+    candidates = sorted(root.rglob("*")) if recursive else sorted(root.iterdir())
+    for item in candidates:
         if len(files) >= limit:
             break
         if not item.is_file() or item.suffix.lower() not in wanted:
@@ -890,7 +900,7 @@ def list_library(
             {
                 "path": str(item),
                 "name": item.name,
-                "relative": str(item.relative_to(root)),
+                "relative": item.name if not recursive else str(item.relative_to(root)),
                 "size": size,
                 "size_text": human_size(size),
             }

@@ -182,6 +182,13 @@ class AssrtClient:
                     "score": row.get("vote_score", row.get("score")),
                     "upload_time": row.get("upload_time") or "",
                     "release_site": row.get("release_site") or "",
+                    # 其余原始字段也带上：界面可以展示，排查时也有据可查
+                    "native_name": row.get("native_name") or "",
+                    "videoname": row.get("videoname") or "",
+                    "sub_name": row.get("sub_name") or "",
+                    "revision": row.get("revision"),
+                    "down_count": row.get("down_count"),
+                    "view_count": row.get("view_count"),
                 }
             )
         return items
