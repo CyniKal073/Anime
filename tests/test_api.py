@@ -490,6 +490,32 @@ def test_batch_embed_rejects_mismatched_counts(client, tmp_path):
     assert "数量不一致" in res.json()["detail"]
 
 
+def test_videos_endpoint_tolerates_quoted_path(client, tmp_path):
+    """Windows 的「复制为路径」带一对双引号，直接当路径会报「目录不存在」。"""
+    (tmp_path / "E01.mkv").write_bytes(b"x")
+    body = client.get("/api/videos", params={"path": f'"{tmp_path}"'}).json()
+    assert body["ok"] is True
+    assert [item["name"] for item in body["files"]] == ["E01.mkv"]
+
+
+def test_videos_endpoint_only_lists_mkv(client, tmp_path):
+    (tmp_path / "E01.mkv").write_bytes(b"x")
+    (tmp_path / "cover.jpg").write_bytes(b"x")
+    (tmp_path / "sub.ass").write_text("x", encoding="utf-8")
+    nested = tmp_path / "Season 2"
+    nested.mkdir()
+    (nested / "E02.mkv").write_bytes(b"x")
+
+    body = client.get("/api/videos", params={"path": str(tmp_path)}).json()
+    assert sorted(item["name"] for item in body["files"]) == ["E01.mkv", "E02.mkv"]
+
+
+def test_videos_endpoint_reports_missing_dir_clearly(client, tmp_path):
+    body = client.get("/api/videos", params={"path": str(tmp_path / "nope")}).json()
+    assert body["ok"] is False
+    assert "目录不存在" in body["error"]
+
+
 def test_batch_embed_reports_partial_failures(client, monkeypatch, tmp_path):
     paths = []
     for name in ("E01.mkv", "E02.mkv"):

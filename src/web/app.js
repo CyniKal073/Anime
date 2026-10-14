@@ -604,11 +604,14 @@ window.addEventListener("DOMContentLoaded", () => {
   $("pathUseManual").onclick = () => chooseSavePath($("pathManual").value.trim());
   $("pathCancel").onclick = () => $("pathDialog").close();
   $("assrtSearch").onclick = searchAssrt;
-  $("batchOpen").onclick = openBatchDialog;
   $("batchCancel").onclick = () => $("batchDialog").close();
-  $("batchLoadSubs").onclick = loadBatchSubs;
   $("batchLoadVideos").onclick = loadBatchVideos;
   $("batchRun").onclick = runBatchEmbed;
+  $("batchPickDir").onclick = () =>
+    openPathDialog(async (dir) => {
+      $("batchDir").value = dir;
+      await loadBatchVideos();
+    });
 });
 
 /* ------------------------------------------------------------ 批量嵌入字幕 */
@@ -698,34 +701,6 @@ function refreshBatchBadges(box, selected) {
   });
 }
 
-async function loadBatchSubs() {
-  const raw = $("batchSubId").value.trim();
-  if (!raw) {
-    toast("请填射手网字幕 id（搜索结果每一项左侧的编号）");
-    return;
-  }
-  try {
-    const r = await api("/api/subtitle/files", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ sub_id: Number(raw) }),
-    });
-    if (!r.ok) {
-      toast("载入失败：" + (r.error || ""), "bad");
-      return;
-    }
-    batchSubs = (r.files || []).map((f) => ({
-      label: f.name || f.url,
-      file_name: f.name,
-      file_url: f.url,
-    }));
-    batchSubsSel = [];
-    renderBatchList($("batchSubs"), batchSubs, batchSubsSel, updateBatchSummary);
-    if (!batchSubs.length) toast("这个条目里没有字幕文件");
-  } catch (err) {
-    toast("载入失败：" + err.message, "bad");
-  }
-}
 
 async function loadBatchVideos() {
   const dir = $("batchDir").value.trim();
@@ -854,7 +829,7 @@ function assrtRow(item) {
   btn.className = "ghost";
   btn.textContent = "嵌入";
   btn.title = "下载这条字幕并嵌进目标视频";
-  btn.onclick = () => embedAssrt(item, btn);
+  btn.onclick = () => openBatchForItem(item);
   row.appendChild(btn);
   return row;
 }
@@ -947,7 +922,10 @@ async function saveDownloadPathAsDefault() {
   }
 }
 
-async function openPathDialog() {
+async function openPathDialog(handler, startPath) {
+  // handler 是回调（批量嵌入用它取文件夹）；不传就按「下载目录」处理。
+  // 注意：直接挂在 onclick 上时第一个参数是事件对象，所以要判类型。
+  pickerHandler = typeof handler === 'function' ? handler : null;
   $("pathManual").value = "";
   await browseTo(state.savePath || state.defaultPath || "");
   $("pathDialog").showModal();
@@ -1016,12 +994,20 @@ function renderBrowse(r) {
   });
 }
 
+let pickerHandler = null;
+
 function chooseSavePath(path) {
+  const handler = pickerHandler;
+  pickerHandler = null;
+  const dialog = $("pathDialog");
+  if (dialog && dialog.open) dialog.close();
+  if (handler) {
+    handler(path || "");
+    return;
+  }
   state.savePath = path || "";
   localStorage.setItem("savePath", state.savePath);
   updateSavePathButton();
-  const dialog = $("pathDialog");
-  if (dialog && dialog.open) dialog.close();
 }
 
 /* ------------------------------------------------------------ 字幕合并 */
@@ -1168,4 +1154,31 @@ async function mergeSubtitles() {
 function applyCalendarCollapsed(collapsed) {
   $("calendar").classList.toggle("collapsed", collapsed);
   $("toggleCalendar").textContent = collapsed ? "展开" : "收起";
+}
+
+/** 从搜索结果进入批量嵌入：先把该条目的字幕文件载进来，再让用户配视频。 */
+async function openBatchForItem(item) {
+  try {
+    const r = await api("/api/subtitle/files", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sub_id: item.sub_id }),
+    });
+    if (!r.ok) {
+      toast("载入字幕文件失败：" + (r.error || ""), "bad");
+      return;
+    }
+    batchSubs = (r.files || []).map((f) => ({
+      label: f.name || f.url,
+      file_name: f.name,
+      file_url: f.url,
+    }));
+    // 只有一个文件（单集字幕）就默认勾上，省一次点击
+    batchSubsSel = batchSubs.length === 1 ? [batchSubs[0]] : [];
+    renderBatchList($("batchSubs"), batchSubs, batchSubsSel, updateBatchSummary);
+    $("batchSubHint").textContent = `${r.title || "字幕"}：共 ${batchSubs.length} 个文件`;
+    openBatchDialog();
+  } catch (err) {
+    toast("载入失败：" + err.message, "bad");
+  }
 }

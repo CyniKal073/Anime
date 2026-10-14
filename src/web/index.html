@@ -278,11 +278,6 @@
     <!-- 搜索结果由脚本渲染，每行带「嵌入」按钮 -->
     <div id="assrtResults"></div>
 
-    <!-- 批量嵌入：左侧选字幕、右侧选视频，按选择顺序一一配对 -->
-    <div class="sub-actions">
-      <button id="batchOpen" class="ghost" type="button">批量嵌入字幕…</button>
-      <span class="muted">适合「一季视频 + 一季字幕包」：左右各多选，按顺序一对一嵌入</span>
-    </div>
   </section>
 
   <!-- ======================================================================
@@ -299,16 +294,15 @@
     <div class="batch-body">
       <div class="batch-pane">
         <div class="batch-head">字幕（按勾选顺序）</div>
-        <div class="batch-tools">
-          <input id="batchSubId" type="text" placeholder="射手网字幕 id（搜索结果里的编号）">
-          <button id="batchLoadSubs" class="ghost small" type="button">载入文件</button>
-        </div>
+        <!-- 字幕文件来自搜索结果：在上面点「嵌入」就带到这里 -->
+        <div class="batch-tools"><span class="muted" id="batchSubHint">在上方搜索结果里点「嵌入」选定字幕来源</span></div>
         <div id="batchSubs" class="batch-list"></div>
       </div>
       <div class="batch-pane">
         <div class="batch-head">视频（按勾选顺序）</div>
         <div class="batch-tools">
           <input id="batchDir" type="text" placeholder="视频所在文件夹">
+          <button id="batchPickDir" class="ghost small" type="button">选择文件夹</button>
           <button id="batchLoadVideos" class="ghost small" type="button">载入视频</button>
         </div>
         <div id="batchVideos" class="batch-list"></div>

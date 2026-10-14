@@ -142,6 +142,8 @@ def _list_drives() -> List[str]:
 
 def browse_directories(ctx: ServiceContext, path: Optional[str] = None) -> Dict[str, Any]:
     """列出某个目录下的子文件夹，供弹窗里逐层选择。"""
+    # Windows 的「复制为路径」会带一对双引号，直接 Path() 会当成非法目录名
+    path = (path or "").strip().strip('"').strip("'") or None
     try:
         target = Path(path) if path else Path(effective_save_path(ctx))
     except (TypeError, ValueError):
@@ -867,7 +869,9 @@ def list_library(
     suffixes: Optional[Sequence[str]] = None,
 ) -> Dict[str, Any]:
     """列出下载目录里的视频文件，供字幕工具选择。"""
-    root = Path(path) if path else Path(ctx.settings.qbit_savepath)
+    # 同上：粘贴来的路径可能带引号
+    cleaned = (path or "").strip().strip('"').strip("'")
+    root = Path(cleaned) if cleaned else Path(ctx.settings.qbit_savepath)
     if not root.is_dir():
         return {"ok": False, "root": str(root), "error": f"目录不存在：{root}", "files": []}
 
