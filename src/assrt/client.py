@@ -167,21 +167,35 @@ class AssrtClient:
         items: List[Dict[str, Any]] = []
         for row in rows:
             lang = row.get("lang") or {}
+
+            # 实测：同一批结果里混着两套命名，必须都认，否则前一半会「无编号」。
+            #   老结构：id / lang.langlist / subtype / upload_time / vote_score
+            #   新结构：fileid / m_langn / m_subtype / uploadtime / score(+score_cnt)
+            # 两边的 id 与 fileid 是同一个值。
+            fmt = row.get("m_subtype") or row.get("subtype") or row.get("format") or ""
+            if str(fmt).strip().isdigit():
+                fmt = ""  # 新结构的 subtype 是数字编码，不是格式名
+            langs = _langs_from(lang) or _langs_from({"langlist": row.get("m_langn")})
+
             items.append(
                 {
-                    "sub_id": row.get("id"),
-                    # 实测字段：native_name 经常为空，退回 videoname / sub_name
+                    "sub_id": row.get("id") or row.get("fileid"),
                     "title": row.get("native_name")
+                    or row.get("m_title")
                     or row.get("sub_name")
                     or row.get("videoname")
                     or "",
-                    "filename": row.get("filename") or "",
-                    "format": (row.get("subtype") or row.get("format") or "").lower() or None,
-                    "langs": _langs_from(lang),
-                    "lang_desc": (lang.get("desc") if isinstance(lang, dict) else None) or "",
+                    "filename": row.get("filename") or row.get("sub_name") or "",
+                    "format": str(fmt).lower() or None,
+                    "langs": langs,
+                    "lang_desc": (lang.get("desc") if isinstance(lang, dict) else None)
+                    or row.get("m_lang")
+                    or "",
                     "score": row.get("vote_score", row.get("score")),
-                    "upload_time": row.get("upload_time") or "",
-                    "release_site": row.get("release_site") or "",
+                    "score_count": row.get("score_cnt"),
+                    "upload_time": row.get("upload_time") or row.get("uploadtime") or "",
+                    "release_site": row.get("release_site") or row.get("m_rl_name") or "",
+                    "is_pack": row.get("m_is_pack"),
                     # 其余原始字段也带上：界面可以展示，排查时也有据可查
                     "native_name": row.get("native_name") or "",
                     "videoname": row.get("videoname") or "",

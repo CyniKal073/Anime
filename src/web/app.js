@@ -881,7 +881,10 @@ function assrtRow(item) {
     item.sub_id ? `#${item.sub_id}` : "⚠ 无编号",
     item.lang_label || (item.langs || []).map((c) => ASSRT_LANG[c] || c).join("/"),
     (item.format || "").toUpperCase(),
-    item.score ? "评分 " + item.score : null,
+    // 评分要带上人数：只有 1 个人评的 100 分和 5 个人评的 62 分不是一回事
+    item.score
+      ? `评分 ${item.score}${item.score_count ? `（${item.score_count} 人）` : ""}`
+      : null,
     item.upload_time ? item.upload_time.slice(0, 10) : null,
     item.release_site,
   ].filter(Boolean).join(" · ");
