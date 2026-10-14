@@ -604,7 +604,184 @@ window.addEventListener("DOMContentLoaded", () => {
   $("pathUseManual").onclick = () => chooseSavePath($("pathManual").value.trim());
   $("pathCancel").onclick = () => $("pathDialog").close();
   $("assrtSearch").onclick = searchAssrt;
+  $("batchOpen").onclick = openBatchDialog;
+  $("batchCancel").onclick = () => $("batchDialog").close();
+  $("batchLoadSubs").onclick = loadBatchSubs;
+  $("batchLoadVideos").onclick = loadBatchVideos;
+  $("batchRun").onclick = runBatchEmbed;
 });
+
+/* ------------------------------------------------------------ 批量嵌入字幕 */
+/*
+  左：字幕文件（射手网条目可能是整季打包）  右：视频文件（某个文件夹下的 .mkv）
+  两边都按【勾选顺序】编号，第 N 个配第 N 个；数量不一致直接拒绝，避免错位。
+*/
+
+let batchSubs = [];      // 左侧全部候选
+let batchVideos = [];    // 右侧全部候选
+let batchSubsSel = [];   // 已勾选的字幕（按顺序）
+let batchVideosSel = []; // 已勾选的视频（按顺序）
+
+function openBatchDialog() {
+  // 目标视频填过的话，默认用它的目录
+  if (!$("batchDir").value) {
+    const target = $("subTarget").value.trim();
+    if (target) {
+      const parts = target.split(/[\\/]/);
+      parts.pop();
+      $("batchDir").value = parts.join("\\");
+    }
+  }
+  updateBatchSummary();
+  $("batchDialog").showModal();
+}
+
+function updateBatchSummary() {
+  const subs = batchSubsSel.length;
+  const vids = batchVideosSel.length;
+  if (!subs && !vids) {
+    $("batchSummary").textContent = "左右各勾选一样多的文件，按顺序一一配对";
+    return;
+  }
+  const pairs = Math.min(subs, vids);
+  const warn = subs === vids ? "" : ` ⚠ 数量不一致（差 ${Math.abs(subs - vids)} 个）`;
+  $("batchSummary").textContent = `字幕 ${subs} 个 / 视频 ${vids} 个${warn}${
+    warn ? "" : `　将配对 ${pairs} 组`
+  }`;
+}
+
+function renderBatchList(box, items, selected, onToggle) {
+  box.innerHTML = "";
+  if (!items.length) {
+    const empty = document.createElement("div");
+    empty.className = "empty";
+    empty.textContent = "（还没有内容）";
+    box.appendChild(empty);
+    return;
+  }
+  items.forEach((item) => {
+    const row = document.createElement("label");
+    row.className = "batch-row";
+    const check = document.createElement("input");
+    check.type = "checkbox";
+    check.checked = selected.includes(item);
+    const badge = document.createElement("span");
+    badge.className = "n";
+    const name = document.createElement("span");
+    name.className = "f";
+    name.textContent = item.label;
+    name.title = item.label;
+    row.appendChild(check);
+    row.appendChild(badge);
+    row.appendChild(name);
+    check.onchange = () => {
+      if (check.checked) selected.push(item);
+      else selected.splice(selected.indexOf(item), 1);
+      row.classList.toggle("on", check.checked);
+      refreshBatchBadges(box, selected);
+      onToggle();
+    };
+    row.classList.toggle("on", check.checked);
+    box.appendChild(row);
+  });
+  refreshBatchBadges(box, selected);
+}
+
+/** 把「第几个勾选」显示到行首的圆标上——配对顺序就是它。 */
+function refreshBatchBadges(box, selected) {
+  const rows = box.querySelectorAll(".batch-row");
+  rows.forEach((row, index) => {
+    const item = box === $("batchSubs") ? batchSubs[index] : batchVideos[index];
+    const badge = row.querySelector(".n");
+    const position = selected.indexOf(item);
+    badge.textContent = position >= 0 ? String(position + 1) : "";
+  });
+}
+
+async function loadBatchSubs() {
+  const raw = $("batchSubId").value.trim();
+  if (!raw) {
+    toast("请填射手网字幕 id（搜索结果每一项左侧的编号）");
+    return;
+  }
+  try {
+    const r = await api("/api/subtitle/files", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sub_id: Number(raw) }),
+    });
+    if (!r.ok) {
+      toast("载入失败：" + (r.error || ""), "bad");
+      return;
+    }
+    batchSubs = (r.files || []).map((f) => ({
+      label: f.name || f.url,
+      file_name: f.name,
+      file_url: f.url,
+    }));
+    batchSubsSel = [];
+    renderBatchList($("batchSubs"), batchSubs, batchSubsSel, updateBatchSummary);
+    if (!batchSubs.length) toast("这个条目里没有字幕文件");
+  } catch (err) {
+    toast("载入失败：" + err.message, "bad");
+  }
+}
+
+async function loadBatchVideos() {
+  const dir = $("batchDir").value.trim();
+  if (!dir) {
+    toast("请填视频所在的文件夹");
+    return;
+  }
+  try {
+    const r = await api("/api/videos?path=" + encodeURIComponent(dir));
+    if (!r.ok) {
+      toast("载入失败：" + (r.error || ""), "bad");
+      return;
+    }
+    batchVideos = (r.files || []).map((f) => ({
+      label: f.name,
+      path: f.path,
+    }));
+    batchVideosSel = [];
+    renderBatchList($("batchVideos"), batchVideos, batchVideosSel, updateBatchSummary);
+    if (!batchVideos.length) toast("这个文件夹里没有 .mkv");
+  } catch (err) {
+    toast("载入失败：" + err.message, "bad");
+  }
+}
+
+async function runBatchEmbed() {
+  if (batchSubsSel.length !== batchVideosSel.length || !batchSubsSel.length) {
+    toast("两边数量要一样多，且不能为空");
+    return;
+  }
+  const btn = $("batchRun");
+  btn.disabled = true;
+  btn.textContent = `嵌入中（0/${batchSubsSel.length}）…`;
+  try {
+    const r = await api("/api/subtitle/embed-batch", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        subtitles: batchSubsSel.map((s) => ({ name: s.file_name, url: s.file_url })),
+        videos: batchVideosSel.map((v) => v.path),
+        language: $("subLang").value,
+        make_default: $("subDefault").checked,
+      }),
+    });
+    const failed = (r.results || []).filter((item) => !item.ok);
+    toast(`完成 ${r.succeeded}/${r.total} 组${failed.length ? "，有失败项" : ""}`, failed.length ? "bad" : "ok");
+    failed.forEach((item) => toast(`第 ${item.index} 组失败：${item.error}`, "bad"));
+    loadLibrary();
+    if (!failed.length) $("batchDialog").close();
+  } catch (err) {
+    toast("批量嵌入失败：" + err.message, "bad");
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "开始批量嵌入";
+  }
+}
 
 /* ---------------------------------------------------------- 在线字幕（射手网） */
 

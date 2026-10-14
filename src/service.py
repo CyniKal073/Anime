@@ -708,6 +708,15 @@ def embed_subtitle(
         files = detail.get("files") or []
         if not files:
             return {"ok": False, "error": "这个字幕条目里没有可下载的文件"}
+        if len(files) > 1:
+            # 早期会直接取第一个文件，结果是「目标视频是第 5 集、嵌进去第 1 集的字幕」
+            # 这种静默错误。现在明确拒绝，让用户去批量嵌入里逐集配对。
+            return {
+                "ok": False,
+                "error": f"这个条目里有 {len(files)} 个字幕文件（多半是整季打包），"
+                "单条嵌入会取错集数。请改用「批量嵌入字幕…」左右配对。",
+                "file_count": len(files),
+            }
         url = files[0]["url"]
         name = files[0]["name"] or name
 
@@ -765,6 +774,85 @@ def embed_subtitle(
     }
 
 
+def assrt_subtitle_files(ctx: ServiceContext, sub_id: int) -> Dict[str, Any]:
+    """列出某个射手网条目里的所有字幕文件。
+
+    射手网的条目常常是「一季打包」，filelist 里会有 01.ass / 02.ass / …
+    所以不能像早期那样直接取第一个——必须先让用户看清有哪些文件。
+    """
+    try:
+        detail = ctx.assrt.detail(int(sub_id))
+    except (AssrtError, ValueError) as exc:
+        return {"ok": False, "error": str(exc), "files": []}
+    files = detail.get("files") or []
+    return {
+        "ok": True,
+        "sub_id": sub_id,
+        "title": detail.get("title") or "",
+        "subtype": detail.get("subtype"),
+        "package_url": detail.get("package_url") or "",
+        "files": files,
+    }
+
+
+def pair_by_order(subtitles: Sequence[Any], videos: Sequence[Any]) -> Dict[str, Any]:
+    """按选择顺序一一配对。
+
+    数量不一致就拒绝——宁可让你回去改选择，也不要静默丢掉几个或者错位嵌入。
+    """
+    subs = [item for item in (subtitles or []) if item]
+    vids = [item for item in (videos or []) if item]
+    if not subs or not vids:
+        return {"ok": False, "error": "字幕和视频都要至少选一个", "pairs": []}
+    if len(subs) != len(vids):
+        return {
+            "ok": False,
+            "error": f"数量不一致：选了 {len(subs)} 个字幕、{len(vids)} 个视频。"
+            "请两边选成一样多（多出来的去掉），避免错位。",
+            "pairs": [],
+        }
+    return {
+        "ok": True,
+        "pairs": [
+            {"index": index + 1, "subtitle": sub, "video": vid}
+            for index, (sub, vid) in enumerate(zip(subs, vids))
+        ],
+    }
+
+
+def embed_subtitles_batch(ctx: ServiceContext, items: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
+    """按给定顺序逐个嵌入（每个视频各自生成 <原名>.subbed.mkv）。"""
+    results: List[Dict[str, Any]] = []
+    for item in items or []:
+        single = embed_subtitle(
+            ctx,
+            target=str(item.get("video") or ""),
+            file_url=item.get("subtitle_url") or None,
+            file_name=item.get("subtitle_name") or None,
+            language=item.get("language") or "chi",
+            track_name=item.get("track_name") or None,
+            output=item.get("output") or None,
+            make_default=bool(item.get("make_default", True)),
+        )
+        results.append(
+            {
+                "index": item.get("index"),
+                "video": item.get("video"),
+                "subtitle": item.get("subtitle_name") or item.get("subtitle_url"),
+                "ok": bool(single.get("ok")),
+                "output": single.get("output"),
+                "error": single.get("error"),
+            }
+        )
+    succeeded = sum(1 for item in results if item["ok"])
+    return {
+        "ok": bool(results) and succeeded == len(results),
+        "total": len(results),
+        "succeeded": succeeded,
+        "results": results,
+    }
+
+
 # ---------------------------------------------------- 内封字幕（MKVToolNix）
 
 #: 列目录时认为「可能是视频」的扩展名
@@ -772,18 +860,23 @@ VIDEO_SUFFIXES = (".mkv", ".mp4", ".m4v", ".avi", ".ts", ".m2ts", ".mov", ".wmv"
 
 
 def list_library(
-    ctx: ServiceContext, path: Optional[str] = None, *, limit: int = 300
+    ctx: ServiceContext,
+    path: Optional[str] = None,
+    *,
+    limit: int = 300,
+    suffixes: Optional[Sequence[str]] = None,
 ) -> Dict[str, Any]:
     """列出下载目录里的视频文件，供字幕工具选择。"""
     root = Path(path) if path else Path(ctx.settings.qbit_savepath)
     if not root.is_dir():
         return {"ok": False, "root": str(root), "error": f"目录不存在：{root}", "files": []}
 
+    wanted = tuple(s.lower() for s in suffixes) if suffixes else VIDEO_SUFFIXES
     files: List[Dict[str, Any]] = []
     for item in sorted(root.rglob("*")):
         if len(files) >= limit:
             break
-        if not item.is_file() or item.suffix.lower() not in VIDEO_SUFFIXES:
+        if not item.is_file() or item.suffix.lower() not in wanted:
             continue
         try:
             size = item.stat().st_size

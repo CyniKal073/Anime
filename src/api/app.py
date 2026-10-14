@@ -26,6 +26,8 @@ from ..service import (
     TorrentFetchError,
     bridge_candidate,
     browse_directories,
+    assrt_subtitle_files,
+    embed_subtitles_batch,
     build_context,
     calendar_view,
     confirm_mapping,
@@ -36,6 +38,7 @@ from ..service import (
     list_releases,
     load_preferences,
     mikan_releases,
+    pair_by_order,
     preferences_from_dict,
     preferences_to_dict,
     resolve_work,
@@ -89,6 +92,19 @@ class SubtitleEmbedRequest(BaseModel):
     language: str = "chi"
     track_name: Optional[str] = None
     output: Optional[str] = None
+    make_default: bool = True
+
+
+class SubtitleFilesRequest(BaseModel):
+    sub_id: int
+
+
+class BatchEmbedRequest(BaseModel):
+    """批量嵌入：字幕与视频按选择顺序一一配对。"""
+
+    subtitles: List[Dict[str, Any]] = []
+    videos: List[str] = []
+    language: str = "chi"
     make_default: bool = True
 
 
@@ -377,6 +393,50 @@ def create_app() -> FastAPI:
             output=req.output,
             make_default=req.make_default,
         )
+
+    @app.post("/api/subtitle/files")
+    def api_subtitle_files(
+        req: SubtitleFilesRequest,
+        ctx: ServiceContext = Depends(get_context),
+    ) -> Dict[str, Any]:
+        """列出某个射手网条目里的全部字幕文件（一季打包时会有多个）。"""
+        return assrt_subtitle_files(ctx, req.sub_id)
+
+    @app.get("/api/videos")
+    def api_videos(
+        path: Optional[str] = None,
+        ctx: ServiceContext = Depends(get_context),
+    ) -> Dict[str, Any]:
+        """列出某个文件夹下的视频文件（只认 mkv，供批量嵌入选片用）。"""
+        result = list_library(ctx, path, suffixes=(".mkv",))
+        result["dir"] = result.pop("root", None)
+        return result
+
+    @app.post("/api/subtitle/embed-batch")
+    def api_subtitle_embed_batch(
+        req: BatchEmbedRequest,
+        ctx: ServiceContext = Depends(get_context),
+    ) -> Dict[str, Any]:
+        """按选择顺序把字幕一一嵌进对应视频。数量不一致直接拒绝。"""
+        paired = pair_by_order(req.subtitles, req.videos)
+        if not paired["ok"]:
+            raise HTTPException(status_code=400, detail=paired["error"])
+
+        items = []
+        for pair in paired["pairs"]:
+            subtitle = pair["subtitle"]
+            items.append(
+                {
+                    "index": pair["index"],
+                    "video": pair["video"],
+                    "subtitle_url": subtitle.get("url"),
+                    "subtitle_name": subtitle.get("name"),
+                    "language": subtitle.get("language") or req.language,
+                    "track_name": subtitle.get("track_name"),
+                    "make_default": req.make_default,
+                }
+            )
+        return embed_subtitles_batch(ctx, items)
 
     @app.get("/api/preferences")
     def api_get_preferences(ctx: ServiceContext = Depends(get_context)) -> Dict[str, Any]:

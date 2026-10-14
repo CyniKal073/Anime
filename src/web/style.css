@@ -260,3 +260,26 @@ tr:hover td { background: #1a1f2b; }
 }
 .assrt-row .a-title { flex: 1; min-width: 0; word-break: break-word; }
 .assrt-row .a-meta { color: var(--dim); font-size: 11px; margin-top: 2px; }
+
+/* 批量嵌入弹窗：左右分栏 */
+.batch-dialog { width: min(880px, 94vw); }
+.batch-body { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; padding: 12px 16px; }
+@media (max-width: 720px) { .batch-body { grid-template-columns: 1fr; } }
+.batch-pane { display: flex; flex-direction: column; min-width: 0; }
+.batch-head { font-size: 12px; color: var(--dim); margin-bottom: 6px; }
+.batch-tools { display: flex; gap: 6px; margin-bottom: 8px; }
+.batch-tools input { flex: 1; min-width: 0; }
+.batch-list { max-height: 300px; overflow-y: auto; }
+.batch-row {
+  display: flex; align-items: center; gap: 8px; padding: 6px 8px;
+  border: 1px solid var(--line); border-radius: 6px; margin-bottom: 4px;
+  background: var(--card-2); font-size: 12px;
+}
+.batch-row.on { border-color: var(--accent); }
+.batch-row .n {
+  flex: none; width: 18px; height: 18px; border-radius: 50%;
+  background: var(--accent); color: #0b1020; font-size: 11px;
+  display: none; align-items: center; justify-content: center; font-weight: 600;
+}
+.batch-row.on .n { display: flex; }
+.batch-row .f { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

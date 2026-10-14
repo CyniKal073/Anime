@@ -385,6 +385,141 @@ def test_subtitle_embed_reports_error_when_unconfigured(client, tmp_path):
     assert "ASSRT_TOKEN" in body["error"]
 
 
+def test_single_embed_refuses_season_pack(client, monkeypatch, tmp_path):
+    """整季打包的条目不能走单条嵌入——早期会静默取第一个文件，导致嵌错集数。"""
+    video = tmp_path / "v.mkv"
+    video.write_bytes(b"x")
+
+    class PackAssrt:
+        def is_configured(self):
+            return True
+
+        def detail(self, sub_id):
+            return {
+                "title": "整季",
+                "files": [
+                    {"name": "01.ass", "url": "http://x/01.ass"},
+                    {"name": "02.ass", "url": "http://x/02.ass"},
+                ],
+            }
+
+    ctx = client.app.dependency_overrides[get_context]()
+    ctx._assrt = PackAssrt()
+
+    body = client.post("/api/subtitle/embed", json={"target": str(video), "sub_id": 644387}).json()
+    assert body["ok"] is False
+    assert body["file_count"] == 2
+    assert "批量嵌入" in body["error"]
+
+
+# ---------------------------------------------------------------- 批量嵌入
+
+
+def test_pair_by_order_keeps_selection_order():
+    from src.service import pair_by_order
+
+    result = pair_by_order(["01.ass", "02.ass"], ["E01.mkv", "E02.mkv"])
+    assert result["ok"] is True
+    assert [p["subtitle"] for p in result["pairs"]] == ["01.ass", "02.ass"]
+    assert [p["video"] for p in result["pairs"]] == ["E01.mkv", "E02.mkv"]
+    assert [p["index"] for p in result["pairs"]] == [1, 2]
+
+
+def test_pair_by_order_rejects_count_mismatch():
+    """数量不一致必须拒绝——静默丢掉几个就会错位嵌入。"""
+    from src.service import pair_by_order
+
+    result = pair_by_order(["01.ass"], ["E01.mkv", "E02.mkv"])
+    assert result["ok"] is False
+    assert "数量不一致" in result["error"]
+    assert result["pairs"] == []
+
+
+def test_pair_by_order_rejects_empty_sides():
+    from src.service import pair_by_order
+
+    assert pair_by_order([], ["E01.mkv"])["ok"] is False
+    assert pair_by_order(["01.ass"], [])["ok"] is False
+
+
+def test_batch_embed_pairs_each_subtitle_with_its_video(client, monkeypatch, tmp_path):
+    videos = []
+    for name in ("E01.mkv", "E02.mkv"):
+        path = tmp_path / name
+        path.write_bytes(b"x")
+        videos.append(str(path))
+
+    calls = []
+
+    def fake_embed(ctx, **kwargs):
+        calls.append(kwargs)
+        return {"ok": True, "output": kwargs["target"] + ".subbed.mkv"}
+
+    monkeypatch.setattr("src.service.embed_subtitle", fake_embed)
+
+    res = client.post(
+        "/api/subtitle/embed-batch",
+        json={
+            "subtitles": [
+                {"name": "01.ass", "url": "http://x/01.ass"},
+                {"name": "02.ass", "url": "http://x/02.ass"},
+            ],
+            "videos": videos,
+        },
+    )
+    assert res.status_code == 200
+    body = res.json()
+    assert body["total"] == 2
+    assert body["succeeded"] == 2
+
+    # 第一个字幕配第一个视频，顺序不能错
+    assert calls[0]["file_name"] == "01.ass"
+    assert calls[0]["target"] == videos[0]
+    assert calls[1]["file_url"] == "http://x/02.ass"
+    assert calls[1]["target"] == videos[1]
+
+
+def test_batch_embed_rejects_mismatched_counts(client, tmp_path):
+    path = tmp_path / "E01.mkv"
+    path.write_bytes(b"x")
+    res = client.post(
+        "/api/subtitle/embed-batch",
+        json={"subtitles": [{"name": "01.ass", "url": "u"}], "videos": [str(path), str(path)]},
+    )
+    assert res.status_code == 400
+    assert "数量不一致" in res.json()["detail"]
+
+
+def test_batch_embed_reports_partial_failures(client, monkeypatch, tmp_path):
+    paths = []
+    for name in ("E01.mkv", "E02.mkv"):
+        item = tmp_path / name
+        item.write_bytes(b"x")
+        paths.append(str(item))
+
+    calls = {"n": 0}
+
+    def flaky_embed(ctx, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            return {"ok": False, "error": "模拟失败"}
+        return {"ok": True, "output": "ok.mkv"}
+
+    monkeypatch.setattr("src.service.embed_subtitle", flaky_embed)
+    body = client.post(
+        "/api/subtitle/embed-batch",
+        json={
+            "subtitles": [{"name": "01.ass", "url": "u1"}, {"name": "02.ass", "url": "u2"}],
+            "videos": paths,
+        },
+    ).json()
+
+    assert body["ok"] is False  # 有一组失败
+    assert body["total"] == 2
+    assert body["succeeded"] == 1
+    assert body["results"][1]["error"] == "模拟失败"
+
+
 def test_search_rejects_blank_title(client):
     assert client.get("/api/search", params={"title": "   "}).status_code == 400
 
