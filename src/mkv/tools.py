@@ -54,6 +54,8 @@ LANGUAGE_ALIASES = {
     "zh-hant": "chi",
     "chs": "chi",
     "cht": "chi",
+    "zh_chs": "chi",
+    "zh_cht": "chi",
     "sc": "chi",
     "tc": "chi",
     "简中": "chi",

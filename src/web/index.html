@@ -266,6 +266,17 @@
       </label>
       <button id="subMerge" class="primary">开始合并</button>
     </div>
+
+    <!-- 在线字幕：从射手网检索，直接嵌进上面的「目标视频」（同样不重编码） -->
+    <div class="sub-actions">
+      <label>在线字幕（射手网）
+        <input id="assrtQuery" type="text" placeholder="片名，可带季数；留空则用目标视频文件名">
+      </label>
+      <button id="assrtSearch" class="ghost" type="button">搜字幕</button>
+      <span class="muted" id="assrtHint"></span>
+    </div>
+    <!-- 搜索结果由脚本渲染，每行带「嵌入」按钮 -->
+    <div id="assrtResults"></div>
   </section>
 
   <!-- ======================================================================

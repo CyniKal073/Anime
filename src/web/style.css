@@ -250,3 +250,13 @@ tr:hover td { background: #1a1f2b; }
   padding: 12px 16px; border-top: 1px solid var(--line);
 }
 .pd-foot input { flex: 1; min-width: 180px; }
+
+/* 在线字幕搜索结果 */
+#assrtResults { margin-top: 10px; }
+.assrt-row {
+  display: flex; gap: 10px; align-items: center;
+  padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px;
+  margin-bottom: 6px; background: var(--card-2); font-size: 13px;
+}
+.assrt-row .a-title { flex: 1; min-width: 0; word-break: break-word; }
+.assrt-row .a-meta { color: var(--dim); font-size: 11px; margin-top: 2px; }

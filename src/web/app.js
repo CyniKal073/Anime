@@ -603,7 +603,122 @@ window.addEventListener("DOMContentLoaded", () => {
   $("pathUseCurrent").onclick = () => chooseSavePath(browsePath);
   $("pathUseManual").onclick = () => chooseSavePath($("pathManual").value.trim());
   $("pathCancel").onclick = () => $("pathDialog").close();
+  $("assrtSearch").onclick = searchAssrt;
 });
+
+/* ---------------------------------------------------------- 在线字幕（射手网） */
+
+const ASSRT_LANG = { zh_chs: "简", zh_cht: "繁", "zh-hans": "简", "zh-hant": "繁", en: "英", jpn: "日" };
+
+/** 从射手网的语言标记推断 mkvmerge 要的三字母代码。 */
+function assrtTrackLanguage(langs) {
+  const first = (langs || [])[0] || "";
+  if (first.startsWith("zh")) return "chi";
+  if (first.startsWith("en")) return "eng";
+  if (first.startsWith("ja")) return "jpn";
+  return "chi";
+}
+
+async function searchAssrt() {
+  const box = $("assrtResults");
+  const query = $("assrtQuery").value.trim() || $("subTarget").value.trim();
+  if (!query) {
+    toast("请填片名，或先在上面填「目标视频」");
+    return;
+  }
+  $("assrtHint").textContent = "检索中…";
+  box.innerHTML = "";
+  try {
+    const r = await api("/api/subtitle/search", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ query, count: 15 }),
+    });
+    if (!r.ok) {
+      $("assrtHint").textContent = "";
+      toast(r.configured === false ? r.error : "检索失败：" + (r.error || ""), "bad");
+      return;
+    }
+    const items = r.items || [];
+    $("assrtHint").textContent = `共 ${items.length} 条`;
+    if (!items.length) {
+      toast("射手网没搜到字幕");
+      return;
+    }
+    items.forEach((item) => box.appendChild(assrtRow(item)));
+  } catch (err) {
+    $("assrtHint").textContent = "";
+    toast("检索失败：" + err.message, "bad");
+  }
+}
+
+function assrtRow(item) {
+  const row = document.createElement("div");
+  row.className = "assrt-row";
+  const info = document.createElement("div");
+  info.className = "a-title";
+  const title = document.createElement("div");
+  title.textContent = item.title || item.filename || "(无标题)";
+  const meta = document.createElement("div");
+  meta.className = "a-meta";
+  meta.textContent = [
+    item.lang_label || (item.langs || []).map((c) => ASSRT_LANG[c] || c).join("/"),
+    (item.format || "").toUpperCase(),
+    item.score ? "评分 " + item.score : null,
+    item.upload_time ? item.upload_time.slice(0, 10) : null,
+    item.release_site,
+  ].filter(Boolean).join(" · ");
+  info.appendChild(title);
+  info.appendChild(meta);
+  row.appendChild(info);
+
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "ghost";
+  btn.textContent = "嵌入";
+  btn.title = "下载这条字幕并嵌进目标视频";
+  btn.onclick = () => embedAssrt(item, btn);
+  row.appendChild(btn);
+  return row;
+}
+
+async function embedAssrt(item, btn) {
+  const target = $("subTarget").value.trim();
+  if (!target) {
+    toast('请先在上面填「目标视频」的路径');
+    return;
+  }
+  btn.disabled = true;
+  btn.textContent = "嵌入中…";
+  try {
+    const r = await api("/api/subtitle/embed", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        target,
+        sub_id: item.sub_id,
+        file_name: item.filename || null,
+        language: assrtTrackLanguage(item.langs),
+        track_name: item.lang_label || null,
+        output: $("subOutput").value.trim() || null,
+        make_default: $("subDefault").checked,
+      }),
+    });
+    if (!r.ok) {
+      toast("嵌入失败：" + (r.error || ""), "bad");
+      btn.disabled = false;
+      btn.textContent = "嵌入";
+      return;
+    }
+    btn.textContent = "已嵌入";
+    toast(`已生成：${r.output}\n字幕 ${r.subtitle_size} 字节，成片 ${r.output_size_text}`, "ok");
+    loadLibrary();
+  } catch (err) {
+    toast("嵌入失败：" + err.message, "bad");
+    btn.disabled = false;
+    btn.textContent = "嵌入";
+  }
+}
 
 /* ------------------------------------------------------------ 下载目录 */
 /*

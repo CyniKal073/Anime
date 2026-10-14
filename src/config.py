@@ -82,6 +82,8 @@ class Settings:
     qbit_executable: str = DEFAULT_QBIT_EXE
     #: MKVToolNix 所在目录（mkvmerge / mkvextract）
     mkv_tools_dir: str = DEFAULT_MKV_TOOLS_DIR
+    #: 射手网 API token（assrt.net 登录后获取）
+    assrt_token: Optional[str] = None
 
     http_timeout: float = 20.0
     http_retries: int = 3
@@ -111,6 +113,7 @@ class Settings:
             qbit_tags=raw("QBIT_TAGS", "nekobt") or "nekobt",
             qbit_executable=raw("QBIT_EXECUTABLE", DEFAULT_QBIT_EXE) or DEFAULT_QBIT_EXE,
             mkv_tools_dir=raw("MKV_TOOLS_DIR", DEFAULT_MKV_TOOLS_DIR) or DEFAULT_MKV_TOOLS_DIR,
+            assrt_token=raw("ASSRT_TOKEN"),
             http_timeout=_get_float(source, "HTTP_TIMEOUT", 20.0),
             http_retries=_get_int(source, "HTTP_RETRIES", 3),
             user_agent=raw("HTTP_USER_AGENT", "anime-release-manager/0.1") or "anime-release-manager/0.1",

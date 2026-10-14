@@ -1,0 +1,125 @@
+"""射手网字幕库客户端（离线）。"""
+
+from __future__ import annotations
+
+import pytest
+
+from src.assrt.client import AssrtClient, AssrtError
+from src.mkv.tools import normalize_language
+
+
+class FakeResponse:
+    def __init__(self, payload=None, *, status_code=200, content=b""):
+        self._payload = payload
+        self.status_code = status_code
+        self.content = content
+        self.text = ""
+
+    def json(self):
+        if self._payload is None:
+            raise ValueError("no json")
+        return self._payload
+
+
+class FakeSession:
+    def __init__(self, responses):
+        self.responses = list(responses)
+        self.calls = []
+
+    def get(self, url, **kwargs):
+        self.calls.append({"url": url, **kwargs})
+        return self.responses.pop(0)
+
+
+SEARCH_PAYLOAD = {
+    "status": 0,
+    "sub": {
+        "subs": [
+            {
+                "id": 123456,
+                "native_name": "妄想学生会 第一季",
+                "filename": "seitokai_01.ass",
+                "format": "ass",
+                "lang": {"langlist": ["zh_chs"], "desc": "简体"},
+                "score": 3,
+                "upload_time": "2020-01-01",
+                "release_site": "dmhy",
+            }
+        ],
+        "pos": 0,
+        "cnt": 15,
+        "total": 1,
+    },
+}
+
+
+def test_search_normalizes_items():
+    session = FakeSession([FakeResponse(SEARCH_PAYLOAD)])
+    client = AssrtClient("token123", session=session)
+
+    items = client.search("妄想学生会")
+
+    assert len(items) == 1
+    item = items[0]
+    assert item["sub_id"] == 123456
+    assert item["title"] == "妄想学生会 第一季"
+    assert item["format"] == "ass"
+    assert item["langs"] == ["zh_chs"]
+    assert item["lang_desc"] == "简体"
+    # token 与关键词都带上了
+    assert session.calls[0]["params"]["token"] == "token123"
+    assert session.calls[0]["params"]["q"] == "妄想学生会"
+
+
+def test_missing_token_says_what_to_do():
+    client = AssrtClient("", session=FakeSession([]))
+    with pytest.raises(AssrtError) as excinfo:
+        client.search("x")
+    message = str(excinfo.value)
+    assert "ASSRT_TOKEN" in message
+    assert client.is_configured() is False
+
+
+def test_api_error_status_becomes_readable():
+    session = FakeSession([FakeResponse({"status": 20001, "errmsg": "invalid token"})])
+    client = AssrtClient("bad", session=session)
+    with pytest.raises(AssrtError) as excinfo:
+        client.search("x")
+    assert "invalid token" in str(excinfo.value)
+
+
+def test_detail_extracts_file_list():
+    payload = {
+        "status": 0,
+        "sub": {
+            "id": 123456,
+            "native_name": "妄想学生会",
+            "filelist": [{"f": "seitokai.ass", "url": "https://example.com/a.ass"}],
+        },
+    }
+    session = FakeSession([FakeResponse(payload)])
+    client = AssrtClient("token123", session=session)
+
+    detail = client.detail(123456)
+    assert detail["files"] == [{"name": "seitokai.ass", "url": "https://example.com/a.ass"}]
+
+
+def test_detail_tolerates_list_shaped_sub():
+    payload = {"status": 0, "sub": [{"id": 1, "filelist": ["https://example.com/b.srt"]}]}
+    session = FakeSession([FakeResponse(payload)])
+    client = AssrtClient("token123", session=session)
+    detail = client.detail(1)
+    assert detail["files"] == [{"name": "https://example.com/b.srt", "url": "https://example.com/b.srt"}]
+
+
+def test_empty_search_returns_nothing_without_request():
+    session = FakeSession([])
+    client = AssrtClient("token123", session=session)
+    assert client.search("   ") == []
+    assert session.calls == []
+
+
+def test_assrt_language_codes_map_to_chinese_track_language():
+    """射手网给的是 zh_chs / zh_cht，mkvmerge 要的是 chi。"""
+    assert normalize_language("zh_chs") == "chi"
+    assert normalize_language("zh_cht") == "chi"

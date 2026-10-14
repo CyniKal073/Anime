@@ -30,6 +30,7 @@ from .qbittorrent.client import QBittorrentClient, QBittorrentError
 from .qbittorrent.launcher import ensure_running
 from .mkv.tools import MkvToolError, MkvTools
 from .mikan.client import MIKAN_SOURCE, MikanClient, MikanError
+from .assrt.client import ASSRT_SOURCE, AssrtClient, AssrtError
 from .net import build_session
 from .release.matcher import (
     FilterResult,
@@ -195,6 +196,7 @@ class ServiceContext:
     _search_cache: Optional[JsonCache] = field(default=None, repr=False)
     _mkv: Optional[MkvTools] = field(default=None, repr=False)
     _mikan: Optional[MikanClient] = field(default=None, repr=False)
+    _assrt: Optional[AssrtClient] = field(default=None, repr=False)
     #: 自检专用探针（短超时、不重试）；测试里可注入假实现
     nekobt_probe: Optional[Any] = None
     bangumi_probe: Optional[Any] = None
@@ -253,6 +255,15 @@ class ServiceContext:
                 user_agent=f"{self.settings.user_agent} (https://github.com/CyniKal073)",
             )
         return self._mikan
+
+    @property
+    def assrt(self) -> AssrtClient:
+        if self._assrt is None:
+            self._assrt = AssrtClient(
+                self.settings.assrt_token,
+                user_agent=f"{self.settings.user_agent} (https://github.com/CyniKal073)",
+            )
+        return self._assrt
 
 
 def build_context(settings: Optional[Settings] = None) -> ServiceContext:
@@ -632,6 +643,121 @@ def _fetch_torrent(url: str, *, user_agent: str) -> Tuple[bytes, str]:
         raise TorrentFetchError("返回的内容不是合法的 .torrent（可能拿到了错误页）")
     filename = unquote(url.rsplit("/", 1)[-1]) or "release.torrent"
     return content, filename
+
+
+# -------------------------------------------------------- 在线字幕（射手网）
+
+#: 射手网的语言标记 → 界面上的中文标签
+ASSRT_LANG_LABEL = {
+    "zh_chs": "简体",
+    "zh_cht": "繁体",
+    "zh-hans": "简体",
+    "zh-hant": "繁体",
+    "en": "英文",
+    "jpn": "日文",
+}
+
+
+def assrt_search(ctx: ServiceContext, query: str, *, count: int = 15) -> Dict[str, Any]:
+    """在射手网搜字幕。"""
+    if not ctx.assrt.is_configured():
+        return {
+            "ok": False,
+            "configured": False,
+            "items": [],
+            "error": "未配置射手网 token：请到 assrt.net 登录后获取，填进 .env 的 ASSRT_TOKEN",
+        }
+    try:
+        items = ctx.assrt.search(query, count=max(1, min(count, 30)))
+    except AssrtError as exc:
+        return {"ok": False, "configured": True, "items": [], "error": str(exc)}
+    for item in items:
+        item["lang_label"] = " / ".join(
+            ASSRT_LANG_LABEL.get(code, code) for code in (item.get("langs") or [])
+        )
+    return {"ok": True, "configured": True, "query": query, "items": items}
+
+
+def embed_subtitle(
+    ctx: ServiceContext,
+    *,
+    target: str,
+    file_url: Optional[str] = None,
+    sub_id: Optional[int] = None,
+    file_name: Optional[str] = None,
+    language: str = "chi",
+    track_name: Optional[str] = None,
+    output: Optional[str] = None,
+    make_default: bool = True,
+) -> Dict[str, Any]:
+    """下载在线字幕并嵌入目标视频（复用 mkvmerge，不重编码）。"""
+    target_path = Path(target)
+    if not target_path.is_file():
+        return {"ok": False, "error": f"目标视频不存在：{target}"}
+
+    url = file_url
+    name = file_name
+    if not url:
+        if sub_id is None:
+            return {"ok": False, "error": "需要给出字幕文件地址，或射手网字幕 id"}
+        try:
+            detail = ctx.assrt.detail(int(sub_id))
+        except AssrtError as exc:
+            return {"ok": False, "error": str(exc)}
+        files = detail.get("files") or []
+        if not files:
+            return {"ok": False, "error": "这个字幕条目里没有可下载的文件"}
+        url = files[0]["url"]
+        name = files[0]["name"] or name
+
+    try:
+        content = ctx.assrt.download(url)
+    except AssrtError as exc:
+        return {"ok": False, "error": str(exc)}
+    if not content:
+        return {"ok": False, "error": "下载到的字幕是空文件"}
+
+    # 扩展名决定 mkvmerge 怎么解析内容，必须给对
+    suffix = Path(name or url).suffix.lower()
+    if suffix not in (".ass", ".ssa", ".srt", ".vtt", ".sup", ".sub"):
+        suffix = ".ass"
+    work_dir = Path(ctx.settings.cache_dir).parent / "subtitles"
+    work_dir.mkdir(parents=True, exist_ok=True)
+    stamp = sub_id if sub_id is not None else "url"
+    subtitle_file = work_dir / f"assrt_{stamp}_{target_path.stem[:40]}{suffix}"
+    subtitle_file.write_bytes(content)
+
+    if output:
+        output_path = Path(output)
+        if not output_path.is_absolute():
+            output_path = target_path.parent / output_path
+    else:
+        output_path = target_path.with_name(f"{target_path.stem}.subbed.mkv")
+    if output_path.suffix.lower() != ".mkv":
+        output_path = output_path.with_suffix(".mkv")
+
+    try:
+        result = ctx.mkv.mux_subtitles(
+            str(target_path),
+            [str(subtitle_file)],
+            str(output_path),
+            language=language,
+            track_name=track_name or None,
+            make_default=make_default,
+        )
+    except MkvToolError as exc:
+        return {"ok": False, "error": str(exc)}
+
+    return {
+        "ok": True,
+        "target": str(target_path),
+        "output": result["output"],
+        "output_size": result.get("size"),
+        "output_size_text": human_size(result.get("size") or 0),
+        "subtitle_file": str(subtitle_file),
+        "subtitle_size": len(content),
+        "warnings": result.get("warnings", False),
+    }
 
 
 # ---------------------------------------------------- 内封字幕（MKVToolNix）

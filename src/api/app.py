@@ -30,6 +30,7 @@ from ..service import (
     calendar_view,
     confirm_mapping,
     download_paths,
+    embed_subtitle,
     health,
     list_library,
     list_releases,
@@ -43,6 +44,7 @@ from ..service import (
     subtitle_merge,
     subtitle_probe,
     submit_download,
+    assrt_search,
 )
 
 WEB_DIR = Path(__file__).resolve().parent.parent / "web"
@@ -72,6 +74,22 @@ class DownloadRequest(BaseModel):
 
 class DownloadPathRequest(BaseModel):
     path: str = ""
+
+
+class SubtitleSearchRequest(BaseModel):
+    query: str
+    count: int = 15
+
+
+class SubtitleEmbedRequest(BaseModel):
+    target: str
+    sub_id: Optional[int] = None
+    file_url: Optional[str] = None
+    file_name: Optional[str] = None
+    language: str = "chi"
+    track_name: Optional[str] = None
+    output: Optional[str] = None
+    make_default: bool = True
 
 
 class PreferencesRequest(BaseModel):
@@ -324,6 +342,36 @@ def create_app() -> FastAPI:
             target=req.target,
             source=req.source,
             track_ids=req.track_ids,
+            language=req.language,
+            track_name=req.track_name,
+            output=req.output,
+            make_default=req.make_default,
+        )
+
+    # ------------------------------------------------------- 在线字幕（射手网）
+
+    @app.post("/api/subtitle/search")
+    def api_subtitle_search(
+        req: SubtitleSearchRequest,
+        ctx: ServiceContext = Depends(get_context),
+    ) -> Dict[str, Any]:
+        """在射手网检索字幕。未配置 token 时返回 configured=false，不报错。"""
+        if not req.query.strip():
+            raise HTTPException(status_code=400, detail="query 不能为空")
+        return assrt_search(ctx, req.query, count=req.count)
+
+    @app.post("/api/subtitle/embed")
+    def api_subtitle_embed(
+        req: SubtitleEmbedRequest,
+        ctx: ServiceContext = Depends(get_context),
+    ) -> Dict[str, Any]:
+        """下载在线字幕并嵌入目标视频（不重编码）。"""
+        return embed_subtitle(
+            ctx,
+            target=req.target,
+            sub_id=req.sub_id,
+            file_url=req.file_url,
+            file_name=req.file_name,
             language=req.language,
             track_name=req.track_name,
             output=req.output,

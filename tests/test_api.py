@@ -361,6 +361,30 @@ def test_bridge_endpoint_rejects_blank_name(client):
     assert body["ok"] is False
 
 
+def test_subtitle_search_without_token_is_graceful(client):
+    """没配射手网 token 时给提示，不是报错。"""
+    res = client.post("/api/subtitle/search", json={"query": "妄想学生会"})
+    assert res.status_code == 200
+    body = res.json()
+    assert body["ok"] is False
+    assert body["configured"] is False
+    assert "ASSRT_TOKEN" in body["error"]
+
+
+def test_subtitle_embed_rejects_missing_video(client):
+    body = client.post("/api/subtitle/embed", json={"target": "D:/nope.mkv", "sub_id": 1}).json()
+    assert body["ok"] is False
+    assert "不存在" in body["error"]
+
+
+def test_subtitle_embed_reports_error_when_unconfigured(client, tmp_path):
+    video = tmp_path / "v.mkv"
+    video.write_bytes(b"x")
+    body = client.post("/api/subtitle/embed", json={"target": str(video), "sub_id": 1}).json()
+    assert body["ok"] is False
+    assert "ASSRT_TOKEN" in body["error"]
+
+
 def test_search_rejects_blank_title(client):
     assert client.get("/api/search", params={"title": "   "}).status_code == 400
 
