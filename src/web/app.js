@@ -840,6 +840,8 @@ function assrtRow(item) {
   const meta = document.createElement("div");
   meta.className = "a-meta";
   meta.textContent = [
+    // 把编号显示出来：点「嵌入」靠的就是它，缺了会当场看得出来
+    item.sub_id ? `#${item.sub_id}` : "⚠ 无编号",
     item.lang_label || (item.langs || []).map((c) => ASSRT_LANG[c] || c).join("/"),
     (item.format || "").toUpperCase(),
     item.score ? "评分 " + item.score : null,
@@ -1187,7 +1189,9 @@ async function openBatchForItem(item) {
   // 没有有效字幕 id 就没法载入文件，先挡住并说清原因（而不是发个空请求换回 422）
   const subId = Number(item && item.sub_id);
   if (!subId) {
-    toast("这条搜索结果没有字幕编号，请重新搜索一次再点「嵌入」", "bad");
+    // 把实际收到的字段一并打出来，免得继续靠猜
+    const keys = item ? Object.keys(item).join(", ") : "(item 为空)";
+    toast(`这条结果没有字幕编号（收到的字段：${keys}）`, "bad");
     return;
   }
   try {
