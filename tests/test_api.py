@@ -8,6 +8,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from src.api.app import create_app, get_context
+from src.assrt.client import AssrtError
 from src.bangumi.client import BangumiUnavailable
 from src.config import Settings
 from src.nekobt.client import TorrentSearchPage
@@ -647,6 +648,172 @@ def test_batch_embed_passes_replace_flag_through(client, monkeypatch, tmp_path):
     assert calls[0]["replace_original"] is True
     assert body["succeeded"] == 1
     assert body["results"][0]["replaced"] is True
+
+
+# ------------------------------------------------- 批量嵌入第一阶段：先下字幕
+
+
+class CountingAssrt:
+    """记下每次下载，顺便能按 url 模拟失败。"""
+
+    def __init__(self, payload=b"[Script Info]", fail_on=()):
+        self.payload = payload
+        self.fail_on = set(fail_on)
+        self.calls = []
+
+    def download(self, url):
+        self.calls.append(url)
+        if url in self.fail_on:
+            raise AssrtError(f"字幕下载失败：HTTP 502（{url}）")
+        return self.payload
+
+
+def _two_videos(tmp_path):
+    paths = []
+    for name in ("E01.mkv", "E02.mkv"):
+        item = tmp_path / name
+        item.write_bytes(b"x")
+        paths.append(str(item))
+    return paths
+
+
+def test_fetch_downloads_whole_batch_into_local_files(client, tmp_path):
+    """第一阶段只下字幕：按配对顺序落盘，返回本地路径给第二阶段。"""
+    videos = _two_videos(tmp_path)
+    ctx = client.app.dependency_overrides[get_context]()
+    ctx._assrt = CountingAssrt()
+
+    body = client.post(
+        "/api/subtitle/fetch",
+        json={
+            "subtitles": [
+                {"name": "01.ass", "url": "http://x/01.ass"},
+                {"name": "02.ass", "url": "http://x/02.ass"},
+            ],
+            "videos": videos,
+        },
+    ).json()
+
+    assert body["ok"] is True
+    assert body["succeeded"] == 2
+    assert [item["index"] for item in body["results"]] == [1, 2]
+    saved = [Path(item["path"]) for item in body["results"]]
+    assert all(item.is_file() for item in saved)
+    # 文件名带上集数：整包里的 01.ass/02.ass 不会互相覆盖，也看得出是给哪一集
+    assert [item.name for item in saved] == ["assrt_01_E01.ass", "assrt_02_E02.ass"]
+
+
+def test_two_phase_embed_downloads_each_subtitle_only_once(client, tmp_path):
+    """两段式的意义：嵌入阶段用第一阶段的本地文件，不会重下一遍。"""
+    videos = _two_videos(tmp_path)
+    ctx = client.app.dependency_overrides[get_context]()
+    assrt = CountingAssrt()
+    ctx._assrt = assrt
+
+    fetched = client.post(
+        "/api/subtitle/fetch",
+        json={
+            "subtitles": [
+                {"name": "01.ass", "url": "http://x/01.ass"},
+                {"name": "02.ass", "url": "http://x/02.ass"},
+            ],
+            "videos": videos,
+        },
+    ).json()
+
+    muxed = []
+
+    class FakeMkv:
+        def mux_subtitles(self, target, subtitle_files, output, **kwargs):
+            muxed.append(subtitle_files[0])
+            Path(output).write_bytes(b"new")
+            return {"output": str(output), "size": 3, "warnings": False}
+
+    ctx._mkv = FakeMkv()
+    body = client.post(
+        "/api/subtitle/embed-batch",
+        json={
+            "subtitles": [
+                {"name": item["name"], "path": item["path"]} for item in fetched["results"]
+            ],
+            "videos": [item["video"] for item in fetched["results"]],
+        },
+    ).json()
+
+    assert body["succeeded"] == 2
+    # 只下了两次（都在第一阶段），嵌入阶段一次都没下
+    assert assrt.calls == ["http://x/01.ass", "http://x/02.ass"]
+    # 嵌进去的就是第一阶段落地的那些文件，顺序也没错
+    assert muxed == [item["path"] for item in fetched["results"]]
+
+
+def test_fetch_reports_failures_per_group(client, tmp_path):
+    """哪一组没下下来就标哪一组，其余照常——而不是整批一起失败。"""
+    videos = _two_videos(tmp_path)
+    ctx = client.app.dependency_overrides[get_context]()
+    ctx._assrt = CountingAssrt(fail_on={"http://x/bad.ass"})
+
+    body = client.post(
+        "/api/subtitle/fetch",
+        json={
+            "subtitles": [
+                {"name": "01.ass", "url": "http://x/ok.ass"},
+                {"name": "02.ass", "url": "http://x/bad.ass"},
+            ],
+            "videos": videos,
+        },
+    ).json()
+
+    assert body["ok"] is False
+    assert body["succeeded"] == 1
+    assert body["results"][0]["ok"] is True
+    assert body["results"][1]["ok"] is False
+    assert "502" in body["results"][1]["error"]
+    assert body["results"][1]["path"] is None
+
+
+def test_fetch_refuses_zip_package(client, tmp_path):
+    """整包地址给的是 zip。当成 .ass 塞给 mkvmerge，报错没人看得懂，不如提前挡住。"""
+    videos = _two_videos(tmp_path)
+    ctx = client.app.dependency_overrides[get_context]()
+    ctx._assrt = CountingAssrt(payload=b"PK\x03\x04rest-of-zip")
+
+    body = client.post(
+        "/api/subtitle/fetch",
+        json={
+            "subtitles": [{"name": "pack.ass", "url": "http://x/pack"}],
+            "videos": [videos[0]],
+        },
+    ).json()
+
+    assert body["ok"] is False
+    assert "zip" in body["results"][0]["error"]
+
+
+def test_fetch_rejects_mismatched_counts(client, tmp_path):
+    videos = _two_videos(tmp_path)
+    res = client.post(
+        "/api/subtitle/fetch",
+        json={"subtitles": [{"name": "01.ass", "url": "u"}], "videos": videos},
+    )
+    assert res.status_code == 400
+    assert "数量不一致" in res.json()["detail"]
+
+
+def test_embed_with_missing_local_subtitle_says_so(client, tmp_path):
+    video = tmp_path / "E01.mkv"
+    video.write_bytes(b"x")
+    ctx = client.app.dependency_overrides[get_context]()
+    ctx._assrt = CountingAssrt()
+
+    body = client.post(
+        "/api/subtitle/embed",
+        json={"target": str(video), "subtitle_path": str(tmp_path / "nope.ass")},
+    ).json()
+
+    assert body["ok"] is False
+    assert "不存在" in body["error"]
+    assert ctx.assrt.calls == []  # 本地文件不见了就不该再去网上下
 
 
 def test_batch_embed_reports_partial_failures(client, monkeypatch, tmp_path):

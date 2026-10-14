@@ -33,6 +33,7 @@ from ..service import (
     confirm_mapping,
     download_paths,
     embed_subtitle,
+    fetch_subtitles_batch,
     health,
     list_library,
     list_releases,
@@ -89,6 +90,8 @@ class SubtitleEmbedRequest(BaseModel):
     target: str
     sub_id: Optional[int] = None
     file_url: Optional[str] = None
+    #: 已经下到本地的字幕文件（批量嵌入第一阶段下载的结果），给了就不再下载
+    subtitle_path: Optional[str] = None
     file_name: Optional[str] = None
     language: str = "chi"
     track_name: Optional[str] = None
@@ -100,6 +103,13 @@ class SubtitleEmbedRequest(BaseModel):
 
 class SubtitleFilesRequest(BaseModel):
     sub_id: int
+
+
+class FetchSubtitlesRequest(BaseModel):
+    """批量嵌入第一阶段：只下字幕，不碰视频。"""
+
+    subtitles: List[Dict[str, Any]] = []
+    videos: List[str] = []
 
 
 class BatchEmbedRequest(BaseModel):
@@ -395,6 +405,7 @@ def create_app() -> FastAPI:
             target=req.target,
             sub_id=req.sub_id,
             file_url=req.file_url,
+            subtitle_path=req.subtitle_path,
             file_name=req.file_name,
             language=req.language,
             track_name=req.track_name,
@@ -402,6 +413,30 @@ def create_app() -> FastAPI:
             make_default=req.make_default,
             replace_original=req.replace_original,
         )
+
+    @app.post("/api/subtitle/fetch")
+    def api_subtitle_fetch(
+        req: FetchSubtitlesRequest,
+        ctx: ServiceContext = Depends(get_context),
+    ) -> Dict[str, Any]:
+        """批量嵌入的第一阶段：按配对顺序把整批字幕先下到本地。
+
+        下载是唯一受网络影响的步骤，先集中做完——失败的话几秒内就知道，而不是
+        等十几个 mkvmerge 跑完才发现某一集没字幕。返回的 path 交给第二阶段。
+        """
+        paired = pair_by_order(req.subtitles, req.videos)
+        if not paired["ok"]:
+            raise HTTPException(status_code=400, detail=paired["error"])
+        items = [
+            {
+                "index": pair["index"],
+                "video": pair["video"],
+                "name": pair["subtitle"].get("name"),
+                "url": pair["subtitle"].get("url"),
+            }
+            for pair in paired["pairs"]
+        ]
+        return fetch_subtitles_batch(ctx, items)
 
     @app.post("/api/subtitle/files")
     def api_subtitle_files(
@@ -441,6 +476,7 @@ def create_app() -> FastAPI:
                 {
                     "index": pair["index"],
                     "video": pair["video"],
+                    "subtitle_path": subtitle.get("path") or subtitle.get("subtitle_path"),
                     "subtitle_url": subtitle.get("url"),
                     "subtitle_name": subtitle.get("name"),
                     "language": subtitle.get("language") or req.language,

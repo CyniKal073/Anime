@@ -749,11 +749,43 @@ def replace_video_with_output(
     return {"replaced": True, "error": None}
 
 
+#: 认得的字幕扩展名。mkvmerge 靠扩展名决定怎么解析内容，给错就白嵌一次。
+SUBTITLE_SUFFIXES = (".ass", ".ssa", ".srt", ".vtt", ".sup", ".sub")
+
+
+def _subtitle_dir(ctx: ServiceContext) -> Path:
+    """字幕的落脚处：``data/subtitles/``。下下来的外挂字幕也留在那儿备用。"""
+    path = Path(ctx.settings.cache_dir).parent / "subtitles"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _subtitle_path(
+    work_dir: Path,
+    *,
+    name: Optional[str],
+    url: Optional[str],
+    video_stem: str,
+    sub_id: Optional[int] = None,
+) -> Path:
+    """给下下来的字幕起一个能认出来的文件名。
+
+    带上视频名有两个用处：整季打包里一堆 ``01.ass`` / ``02.ass`` 不会互相覆盖，
+    而且回头翻 ``data/subtitles/`` 就知道哪一条是给哪一集的。
+    """
+    suffix = Path(name or url or "").suffix.lower()
+    if suffix not in SUBTITLE_SUFFIXES:
+        suffix = ".ass"
+    stamp = str(sub_id) if sub_id is not None else (Path(name or "file").stem[:30] or "url")
+    return work_dir / f"assrt_{stamp}_{video_stem[:40]}{suffix}"
+
+
 def embed_subtitle(
     ctx: ServiceContext,
     *,
     target: str,
     file_url: Optional[str] = None,
+    subtitle_path: Optional[str] = None,
     sub_id: Optional[int] = None,
     file_name: Optional[str] = None,
     language: str = "chi",
@@ -762,14 +794,23 @@ def embed_subtitle(
     make_default: bool = True,
     replace_original: bool = False,
 ) -> Dict[str, Any]:
-    """下载在线字幕并嵌入目标视频（复用 mkvmerge，不重编码）。"""
+    """把一条字幕嵌进目标视频（复用 mkvmerge，不重编码）。
+
+    字幕来源三选一：
+
+    * ``subtitle_path`` —— 已经躺在本地硬盘上的字幕文件（批量嵌入的第一阶段
+      会先把整批下完，走的就是这条路，不会重复下载）；
+    * ``file_url``      —— 字幕文件直链，现下现用；
+    * ``sub_id``        —— 射手网条目编号，先查详情再取里面的文件（只接受
+      单文件的条目，整季打包会取错集数，必须去批量嵌入里逐集配对）。
+    """
     target_path = Path(target)
     if not target_path.is_file():
         return {"ok": False, "error": f"目标视频不存在：{target}"}
 
     url = file_url
     name = file_name
-    if not url:
+    if not subtitle_path and not url:
         if sub_id is None:
             return {"ok": False, "error": "需要给出字幕文件地址，或射手网字幕 id"}
         try:
@@ -791,26 +832,31 @@ def embed_subtitle(
         url = files[0]["url"]
         name = files[0]["name"] or name
 
-    try:
-        content = ctx.assrt.download(url)
-    except AssrtError as exc:
-        return {"ok": False, "error": str(exc)}
-    if not content:
-        return {"ok": False, "error": "下载到的字幕是空文件"}
-
-    # 扩展名决定 mkvmerge 怎么解析内容，必须给对
-    suffix = Path(name or url).suffix.lower()
-    if suffix not in (".ass", ".ssa", ".srt", ".vtt", ".sup", ".sub"):
-        suffix = ".ass"
-    work_dir = Path(ctx.settings.cache_dir).parent / "subtitles"
-    work_dir.mkdir(parents=True, exist_ok=True)
-    # 文件名里带上来源标识，便于在 data/subtitles/ 里认出这堆文件是哪来的
-    if sub_id is not None:
-        stamp = str(sub_id)
+    if subtitle_path:
+        # 已经在本地的字幕：直接用，不再下一遍
+        subtitle_file = Path(subtitle_path)
+        if not subtitle_file.is_file():
+            return {"ok": False, "error": f"本地字幕文件不存在：{subtitle_path}"}
+        try:
+            subtitle_size = subtitle_file.stat().st_size
+        except OSError:
+            subtitle_size = 0
     else:
-        stamp = Path(name or "file").stem[:30] or "url"
-    subtitle_file = work_dir / f"assrt_{stamp}_{target_path.stem[:40]}{suffix}"
-    subtitle_file.write_bytes(content)
+        try:
+            content = ctx.assrt.download(url)
+        except AssrtError as exc:
+            return {"ok": False, "error": str(exc)}
+        if not content:
+            return {"ok": False, "error": "下载到的字幕是空文件"}
+        subtitle_file = _subtitle_path(
+            _subtitle_dir(ctx),
+            name=name,
+            url=url,
+            video_stem=target_path.stem,
+            sub_id=sub_id,
+        )
+        subtitle_file.write_bytes(content)
+        subtitle_size = len(content)
 
     if output:
         output_path = Path(output)
@@ -845,7 +891,7 @@ def embed_subtitle(
         "output_size": result.get("size"),
         "output_size_text": human_size(result.get("size") or 0),
         "subtitle_file": str(subtitle_file),
-        "subtitle_size": len(content),
+        "subtitle_size": subtitle_size,
         "warnings": result.get("warnings", False),
         "replaced": False,
     }
@@ -914,12 +960,15 @@ def embed_subtitles_batch(ctx: ServiceContext, items: Sequence[Dict[str, Any]]) 
 
     默认每个视频各自生成 ``<原名>.subbed.mkv``（原文件保留）；
     某一项带 ``replace_original`` 时，嵌入成功后新文件会顶替原视频。
+    字幕优先用 ``subtitle_path``（第一阶段已经下到本地的那个文件），
+    没有才用 ``subtitle_url`` 现下。
     """
     results: List[Dict[str, Any]] = []
     for item in items or []:
         single = embed_subtitle(
             ctx,
             target=str(item.get("video") or ""),
+            subtitle_path=item.get("subtitle_path") or None,
             file_url=item.get("subtitle_url") or None,
             file_name=item.get("subtitle_name") or None,
             language=item.get("language") or "chi",
@@ -940,6 +989,62 @@ def embed_subtitles_batch(ctx: ServiceContext, items: Sequence[Dict[str, Any]]) 
                 "error": single.get("error"),
             }
         )
+    succeeded = sum(1 for item in results if item["ok"])
+    return {
+        "ok": bool(results) and succeeded == len(results),
+        "total": len(results),
+        "succeeded": succeeded,
+        "results": results,
+    }
+
+
+def fetch_subtitles_batch(ctx: ServiceContext, items: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
+    """批量嵌入的第一阶段：把整批字幕先下到本地（``data/subtitles/``）。
+
+    下载是整条链路里唯一受网络和对端影响的步骤（射手网的下载服务器偶发 502）。
+    把它集中到开头几秒做完有两个好处：坏消息立刻就能听到，不用等十几个 mkvmerge
+    跑完才发现某一集压根没字幕；而且后面的嵌入全是本地操作，中途网络抖动也影响不到。
+
+    下下来的文件会留在 ``data/subtitles/``——既是嵌入的输入，也能当外挂字幕用；
+    某一组嵌入失败时，重跑不必再下一遍。
+    """
+    work_dir = _subtitle_dir(ctx)
+    results: List[Dict[str, Any]] = []
+    for item in items or []:
+        video = str(item.get("video") or "")
+        name = item.get("name") or ""
+        url = item.get("url") or ""
+        entry: Dict[str, Any] = {
+            "index": item.get("index"),
+            "video": video,
+            "name": name,
+            "ok": False,
+            "path": None,
+            "size": 0,
+            "error": None,
+        }
+        if not url:
+            entry["error"] = "这一组没有字幕下载地址"
+            results.append(entry)
+            continue
+        try:
+            content = ctx.assrt.download(url)
+        except AssrtError as exc:
+            entry["error"] = str(exc)
+        else:
+            if not content:
+                entry["error"] = "下载到的字幕是空文件"
+            elif content[:4] == b"PK\x03\x04":
+                # 整包地址给的是 zip，扩展名会被当成 .ass 丢给 mkvmerge，
+                # 报出来的错会莫名其妙。在这里就挡住，并说清该怎么办。
+                entry["error"] = "下载到的是 zip 整包，不是单个字幕文件（请改用条目里列出的具体文件）"
+            else:
+                path = _subtitle_path(work_dir, name=name, url=url, video_stem=Path(video).stem)
+                path.write_bytes(content)
+                entry["ok"] = True
+                entry["path"] = str(path)
+                entry["size"] = len(content)
+        results.append(entry)
     succeeded = sum(1 for item in results if item["ok"])
     return {
         "ok": bool(results) and succeeded == len(results),

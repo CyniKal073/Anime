@@ -773,6 +773,16 @@ async function loadBatchVideos() {
    拆成小批逐个请求：进度能一组一组地报，某一批出问题也不牵连其它批。 */
 const BATCH_CHUNK = 3;
 
+/**
+ * 批量嵌入分两步走：
+ *
+ *   一、先把选中的字幕全部下到本地（几秒钟的事）；
+ *   二、再一组一组地嵌。
+ *
+ * 下载是唯一受网络和对端影响的步骤（射手网的下载服务器偶发 502）。先集中做完，
+ * 坏消息几秒内就能听到——不用等十几个 mkvmerge 跑完才发现第七集压根没字幕；
+ * 而且第二阶段全是本地操作，中途网断了也不影响已经开始的嵌入。
+ */
 async function runBatchEmbed() {
   if (batchSubsSel.length !== batchVideosSel.length || !batchSubsSel.length) {
     toast("两边数量要一样多，且不能为空");
@@ -782,40 +792,75 @@ async function runBatchEmbed() {
   const replace = $("batchReplace").checked;
   const btn = $("batchRun");
   btn.disabled = true;
-  const results = [];
   try {
-    for (let start = 0; start < total; start += BATCH_CHUNK) {
-      const stop = Math.min(start + BATCH_CHUNK, total);
-      btn.textContent = `嵌入中（${start + 1}–${stop}/${total}）…`;
+    // ---- 第一阶段：下字幕 ----
+    btn.textContent = `下载字幕（${total} 个）…`;
+    let fetched;
+    try {
+      fetched = await api("/api/subtitle/fetch", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          subtitles: batchSubsSel.map((s) => ({ name: s.file_name, url: s.file_url })),
+          videos: batchVideosSel.map((v) => v.path),
+        }),
+      });
+    } catch (err) {
+      toast("下载字幕失败，没有开始嵌入：" + err.message, "bad");
+      return;
+    }
+
+    const ready = (fetched.results || []).filter((item) => item.ok);
+    const results = (fetched.results || [])
+      .filter((item) => !item.ok)
+      .map((item) => ({
+        index: item.index,
+        video: item.video,
+        ok: false,
+        error: "字幕没下下来：" + item.error,
+      }));
+    if (!ready.length) {
+      toast("一个字幕都没下下来，没有开始嵌入", "bad");
+      results.forEach((item) => toast(`第 ${item.index} 组：${item.error}`, "bad"));
+      $("batchSummary").textContent = `0/${total} 组：字幕全部下载失败`;
+      return;
+    }
+    if (results.length) {
+      toast(`有 ${results.length} 个字幕没下下来，先跳过那几组`, "bad");
+    }
+
+    // ---- 第二阶段：嵌入（只嵌字幕已经到位的那些组）----
+    for (let start = 0; start < ready.length; start += BATCH_CHUNK) {
+      const batch = ready.slice(start, start + BATCH_CHUNK);
+      btn.textContent = `嵌入中（${start + 1}–${start + batch.length}/${ready.length}）…`;
       try {
         const r = await api("/api/subtitle/embed-batch", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            subtitles: batchSubsSel
-              .slice(start, stop)
-              .map((s) => ({ name: s.file_name, url: s.file_url })),
-            videos: batchVideosSel.slice(start, stop).map((v) => v.path),
+            // 传第一阶段的本地路径，服务端不会再下一遍
+            subtitles: batch.map((p) => ({ name: p.name, path: p.path })),
+            videos: batch.map((p) => p.video),
             language: $("subLang").value,
             make_default: $("subDefault").checked,
             replace_original: replace,
           }),
         });
         (r.results || []).forEach((item, i) => {
-          // 每批的编号都是从 1 起算的，换算成整批里的序号
-          results.push({ ...item, index: start + i + 1 });
+          // 每批的编号都是从 1 起算的，换回整批里的序号
+          results.push({ ...item, index: batch[i].index });
         });
       } catch (err) {
         // 这一批没回话，但服务端很可能还在跑（mkvmerge 是子进程，连接断了它
         // 也不会停）。所以记成「不确定」而不是「失败」，免得让人以为白跑了。
-        for (let i = start; i < stop; i += 1) {
+        batch.forEach((pair) => {
           results.push({
-            index: i + 1,
-            video: batchVideosSel[i].path,
+            index: pair.index,
+            video: pair.video,
             ok: false,
             error: `请求中断（${err.message}）——这一组可能仍在后台嵌，稍后刷新视频文件夹确认`,
           });
-        }
+        });
       }
     }
     reportBatchResults(results);
