@@ -89,6 +89,10 @@ class AssrtClient:
     #: 可用 .env 的 ASSRT_MIN_INTERVAL 调整。
     DEFAULT_MIN_INTERVAL = 12.0
 
+    #: 字幕文件本身的下载重试次数。这条链路偶发 502/503，重试基本都能过，
+    #: 而且不占 API 配额，所以给得比接口请求宽一点。
+    DOWNLOAD_ATTEMPTS = 3
+
     def _bases(self) -> List[str]:
         bases = [self.base_url]
         if "api.assrt.net" in self.base_url:
@@ -96,6 +100,12 @@ class AssrtClient:
         return bases
 
     # ------------------------------------------------------------------ 内部
+
+    def _respect_interval(self) -> None:
+        """按配额等够最小间隔再发请求（重试也要算一次请求，不能插队）。"""
+        gap = time.time() - self._last_request
+        if gap < self.min_interval:
+            time.sleep(self.min_interval - gap)
 
     def _get(
         self, path: str, params: Dict[str, Any], *, attempts: int = 4
@@ -114,27 +124,30 @@ class AssrtClient:
         }
         query = {k: v for k, v in params.items() if v is not None}
 
-        gap = time.time() - self._last_request
-        if gap < self.min_interval:
-            time.sleep(self.min_interval - gap)
-
-        # 实测这条链路不稳定：直连/代理都可能出现 SSL EOF，重试几次就能过；
-        # 主域名持续失败时换文档给的替代域名再试。
+        # 实测这条链路不稳定：直连/代理都可能出现 SSL EOF、502/503，
+        # 重试几次就能过；主域名持续失败时换文档给的替代域名再试。
         response = None
         last_error: Optional[Exception] = None
         for base in self._bases():
             url = f"{base}{path}"
             for attempt in range(1, max(1, attempts) + 1):
+                self._respect_interval()
                 try:
                     self._last_request = time.time()
                     response = self.session.get(
                         url, params=query, headers=headers, timeout=self.timeout
                     )
-                    break
                 except requests.RequestException as exc:
                     last_error = exc
-                    if attempt < attempts:
-                        time.sleep(1.5 * attempt)
+                    response = None
+                else:
+                    status = getattr(response, "status_code", 200) or 200
+                    # 5xx / 429 是「稍后再试」的意思：拿它去 json() 只会得到
+                    # 「返回的不是 JSON（HTTP 502）」这种没用的报错
+                    if status < 500 and status != 429:
+                        break
+                    last_error = AssrtError(f"射手网返回 HTTP {status}")
+                    response = None
             if response is not None:
                 break
         if response is None:
@@ -237,18 +250,33 @@ class AssrtClient:
         }
 
     def download(self, url: str) -> Any:
-        """下载字幕文件内容（返回字节）。"""
+        """下载字幕文件内容（返回字节）。
+
+        这条链路会偶发 HTTP 502/503（射手网自己的下载服务器，挂了代理时更容易
+        碰到），而批量嵌入里一组失败就会让整批显示「有失败项」。所以这里自己
+        重试几次——**重试不占 API 配额**，配额只算检索和详情那两个接口。
+        4xx 不重试：那是文件本身的问题（没了 / 没权限），等多久都没用。
+        """
         if not url:
             raise AssrtError("字幕下载地址为空")
-        try:
-            response = self.session.get(
-                url, headers={"User-Agent": self.user_agent}, timeout=self.timeout
-            )
-        except requests.RequestException as exc:
-            raise AssrtError(f"字幕下载失败：{exc}") from exc
-        if response.status_code >= 400:
-            raise AssrtError(f"字幕下载失败：HTTP {response.status_code}")
-        return response.content
+        last_error = "字幕下载失败"
+        for attempt in range(1, self.DOWNLOAD_ATTEMPTS + 1):
+            try:
+                response = self.session.get(
+                    url, headers={"User-Agent": self.user_agent}, timeout=self.timeout
+                )
+            except requests.RequestException as exc:
+                last_error = f"字幕下载失败：{exc}"
+            else:
+                status = getattr(response, "status_code", 200) or 200
+                if status < 400:
+                    return response.content
+                last_error = f"字幕下载失败：HTTP {status}（{url}）"
+                if status < 500 and status != 429:
+                    break
+            if attempt < self.DOWNLOAD_ATTEMPTS:
+                time.sleep(1.5 * attempt)
+        raise AssrtError(last_error)
 
     def is_configured(self) -> bool:
         return bool(self.token)

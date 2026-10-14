@@ -250,6 +250,12 @@ tr:hover td { background: #1a1f2b; }
   padding: 12px 16px; border-top: 1px solid var(--line);
 }
 .pd-foot input { flex: 1; min-width: 180px; }
+/* 底部那个「替换原文件」勾选框不能跟着上面的输入框一起被撑开 */
+.pd-foot label.check {
+  display: flex; align-items: center; gap: 6px;
+  margin-left: auto; color: var(--dim); font-size: 12px;
+}
+.pd-foot label.check input { flex: none; min-width: 0; }
 
 /* 在线字幕搜索结果 */
 #assrtResults { margin-top: 10px; }

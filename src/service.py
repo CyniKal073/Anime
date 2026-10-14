@@ -708,6 +708,47 @@ def assrt_search(
     return {"ok": True, "configured": True, "query": query, "pos": pos, "items": items}
 
 
+def replace_video_with_output(
+    target_path: Path,
+    output_path: Path,
+    *,
+    original_size: Optional[int] = None,
+) -> Dict[str, Any]:
+    """用刚生成的新文件顶替原视频（对应 ``replace_original`` 开关）。
+
+    mkvmerge 必须先把新文件完整写出来才能删掉旧的，所以过程中仍会短暂占用双份
+    空间；但不会像以前那样每集都留一份 ``.subbed.mkv``，批量处理也就不会越积越多。
+
+    删之前会看一眼新文件的大小：嵌入字幕只是往容器里加一条轨道，新文件理应不比
+    原文件小。明显偏小说明 mkvmerge 少拷了流，这时宁可不替换——原视频还在，
+    最多白跑一次，不会丢片子。
+    """
+    try:
+        new_size = output_path.stat().st_size
+    except OSError:
+        return {"replaced": False, "error": f"找不到新生成的文件：{output_path}（原视频未动）"}
+    if original_size and new_size < original_size * 0.5:
+        return {
+            "replaced": False,
+            "error": f"新文件只有 {human_size(new_size)}，明显小于原视频 "
+            f"{human_size(original_size)}，为安全起见没有替换（新文件仍在 {output_path}）",
+        }
+    try:
+        # Path.replace 在 Windows 上也是原子覆盖，不需要先删原文件——少一个
+        # 「删了旧的、改名失败」的丢数据窗口。
+        output_path.replace(target_path)
+    except OSError as exc:
+        hint = ""
+        if isinstance(exc, PermissionError):
+            # 最常见的原因：qBittorrent 还在做种、或者播放器开着这个文件
+            hint = "（文件可能正被 qBittorrent 做种或播放器占用，先暂停任务再试）"
+        return {
+            "replaced": False,
+            "error": f"替换原视频失败{hint}（新文件仍在 {output_path}）：{exc}",
+        }
+    return {"replaced": True, "error": None}
+
+
 def embed_subtitle(
     ctx: ServiceContext,
     *,
@@ -719,6 +760,7 @@ def embed_subtitle(
     track_name: Optional[str] = None,
     output: Optional[str] = None,
     make_default: bool = True,
+    replace_original: bool = False,
 ) -> Dict[str, Any]:
     """下载在线字幕并嵌入目标视频（复用 mkvmerge，不重编码）。"""
     target_path = Path(target)
@@ -780,6 +822,11 @@ def embed_subtitle(
         output_path = output_path.with_suffix(".mkv")
 
     try:
+        original_size = target_path.stat().st_size
+    except OSError:
+        original_size = None
+
+    try:
         result = ctx.mkv.mux_subtitles(
             str(target_path),
             [str(subtitle_file)],
@@ -791,7 +838,7 @@ def embed_subtitle(
     except MkvToolError as exc:
         return {"ok": False, "error": str(exc)}
 
-    return {
+    payload: Dict[str, Any] = {
         "ok": True,
         "target": str(target_path),
         "output": result["output"],
@@ -800,7 +847,20 @@ def embed_subtitle(
         "subtitle_file": str(subtitle_file),
         "subtitle_size": len(content),
         "warnings": result.get("warnings", False),
+        "replaced": False,
     }
+    if replace_original:
+        swap = replace_video_with_output(
+            target_path, Path(str(result["output"])), original_size=original_size
+        )
+        payload["replaced"] = bool(swap.get("replaced"))
+        if payload["replaced"]:
+            # 新文件已经改名成原文件了，返回的路径也得跟着变，
+            # 否则前端还指着那个已经不存在的 .subbed.mkv
+            payload["output"] = str(target_path)
+        elif swap.get("error"):
+            payload["replace_error"] = swap["error"]
+    return payload
 
 
 def assrt_subtitle_files(ctx: ServiceContext, sub_id: int) -> Dict[str, Any]:
@@ -850,7 +910,11 @@ def pair_by_order(subtitles: Sequence[Any], videos: Sequence[Any]) -> Dict[str, 
 
 
 def embed_subtitles_batch(ctx: ServiceContext, items: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
-    """按给定顺序逐个嵌入（每个视频各自生成 <原名>.subbed.mkv）。"""
+    """按给定顺序逐个嵌入。
+
+    默认每个视频各自生成 ``<原名>.subbed.mkv``（原文件保留）；
+    某一项带 ``replace_original`` 时，嵌入成功后新文件会顶替原视频。
+    """
     results: List[Dict[str, Any]] = []
     for item in items or []:
         single = embed_subtitle(
@@ -862,6 +926,7 @@ def embed_subtitles_batch(ctx: ServiceContext, items: Sequence[Dict[str, Any]]) 
             track_name=item.get("track_name") or None,
             output=item.get("output") or None,
             make_default=bool(item.get("make_default", True)),
+            replace_original=bool(item.get("replace_original", False)),
         )
         results.append(
             {
@@ -870,6 +935,8 @@ def embed_subtitles_batch(ctx: ServiceContext, items: Sequence[Dict[str, Any]]) 
                 "subtitle": item.get("subtitle_name") or item.get("subtitle_url"),
                 "ok": bool(single.get("ok")),
                 "output": single.get("output"),
+                "replaced": bool(single.get("replaced")),
+                "replace_error": single.get("replace_error"),
                 "error": single.get("error"),
             }
         )
@@ -948,11 +1015,14 @@ def subtitle_merge(
     track_name: Optional[str] = None,
     output: Optional[str] = None,
     make_default: bool = True,
+    replace_original: bool = False,
 ) -> Dict[str, Any]:
     """把来源视频里的字幕轨搬进目标视频。
 
     流程：mkvextract 提取 → mkvmerge 合并。视频/音频流原样复制，不重编码。
     提取出的字幕文件保留在 data/subtitles/ 下，方便单独取用。
+    ``replace_original`` 为真时，合并成功后新文件顶替原视频（最终文件名还是原
+    文件名，``output`` 就不再起作用了）。
     """
     if not track_ids:
         return {"ok": False, "error": "请至少选择一条字幕轨"}
@@ -974,6 +1044,11 @@ def subtitle_merge(
 
     extract_dir = Path(ctx.settings.cache_dir).parent / "subtitles"
     try:
+        original_size = target_path.stat().st_size
+    except OSError:
+        original_size = None
+
+    try:
         extracted = ctx.mkv.extract(source, list(track_ids), str(extract_dir))
         result = ctx.mkv.mux_subtitles(
             str(target_path),
@@ -986,7 +1061,7 @@ def subtitle_merge(
     except MkvToolError as exc:
         return {"ok": False, "error": str(exc)}
 
-    return {
+    payload: Dict[str, Any] = {
         "ok": True,
         "target": str(target_path),
         "source": source,
@@ -995,7 +1070,18 @@ def subtitle_merge(
         "output_size_text": human_size(result.get("size") or 0),
         "extracted": extracted,
         "warnings": result.get("warnings", False),
+        "replaced": False,
     }
+    if replace_original:
+        swap = replace_video_with_output(
+            target_path, Path(str(result["output"])), original_size=original_size
+        )
+        payload["replaced"] = bool(swap.get("replaced"))
+        if payload["replaced"]:
+            payload["output"] = str(target_path)
+        elif swap.get("error"):
+            payload["replace_error"] = swap["error"]
+    return payload
 
 
 def releases_to_dict(release: Release) -> Dict[str, Any]:
@@ -1015,11 +1101,11 @@ def releases_to_dict(release: Release) -> Dict[str, Any]:
         "upgraded": release.upgraded,
         "filesize": release.filesize,
         "size_text": release.size_text,
+        "uploaded_at": release.uploaded_at,
         "seeders": release.seeders,
         "leechers": release.leechers,
         "infohash": release.infohash,
         "media_id": release.media_id,
-        "source": release.source,
         "origin": release.origin,
         "torrent_url": release.torrent_url,
     }
@@ -1079,6 +1165,11 @@ def _release_page(
             return [{"release": releases_to_dict(r), "score": None, "reasons": []} for r in ordered]
         if sort == "size":
             ordered = sorted(items, key=lambda r: (r.filesize or 0))
+            return [{"release": releases_to_dict(r), "score": None, "reasons": []} for r in ordered]
+        if sort == "date":
+            # 发布时间新的在前。少数来源没给时间，当作 0 沉到末尾。
+            # nekoBT 和蜜柑给的都是毫秒时间戳，可以直接比。
+            ordered = sorted(items, key=lambda r: (r.uploaded_at or 0), reverse=True)
             return [{"release": releases_to_dict(r), "score": None, "reasons": []} for r in ordered]
         return [
             {

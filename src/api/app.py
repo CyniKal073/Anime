@@ -94,6 +94,8 @@ class SubtitleEmbedRequest(BaseModel):
     track_name: Optional[str] = None
     output: Optional[str] = None
     make_default: bool = True
+    #: 嵌入成功后用新文件顶替原视频（省空间，但不可逆）
+    replace_original: bool = False
 
 
 class SubtitleFilesRequest(BaseModel):
@@ -107,6 +109,8 @@ class BatchEmbedRequest(BaseModel):
     videos: List[str] = []
     language: str = "chi"
     make_default: bool = True
+    #: 每一组嵌入成功后都用新文件顶替原视频
+    replace_original: bool = False
 
 
 class PreferencesRequest(BaseModel):
@@ -142,6 +146,8 @@ class SubtitleMergeRequest(BaseModel):
     track_name: Optional[str] = None
     output: Optional[str] = None
     make_default: bool = True
+    #: 合并成功后用新文件顶替原视频（省空间，但不可逆）
+    replace_original: bool = False
 
 
 def create_app() -> FastAPI:
@@ -363,6 +369,7 @@ def create_app() -> FastAPI:
             track_name=req.track_name,
             output=req.output,
             make_default=req.make_default,
+            replace_original=req.replace_original,
         )
 
     # ------------------------------------------------------- 在线字幕（射手网）
@@ -393,6 +400,7 @@ def create_app() -> FastAPI:
             track_name=req.track_name,
             output=req.output,
             make_default=req.make_default,
+            replace_original=req.replace_original,
         )
 
     @app.post("/api/subtitle/files")
@@ -438,6 +446,7 @@ def create_app() -> FastAPI:
                     "language": subtitle.get("language") or req.language,
                     "track_name": subtitle.get("track_name"),
                     "make_default": req.make_default,
+                    "replace_original": req.replace_original,
                 }
             )
         return embed_subtitles_batch(ctx, items)

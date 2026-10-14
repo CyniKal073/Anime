@@ -141,3 +141,40 @@ def test_assrt_language_codes_map_to_chinese_track_language():
     """射手网给的是 zh_chs / zh_cht，mkvmerge 要的是 chi。"""
     assert normalize_language("zh_chs") == "chi"
     assert normalize_language("zh_cht") == "chi"
+
+
+def test_download_retries_transient_502(monkeypatch):
+    """「字幕下载失败：HTTP 502」是射手网下载服务器偶发的，重试一次就能过。
+
+    批量嵌入里一组失败就整批显示「有失败项」，所以这里必须自己重试。
+    """
+    monkeypatch.setattr("src.assrt.client.time.sleep", lambda _seconds: None)
+    session = FakeSession(
+        [
+            FakeResponse(status_code=502),
+            FakeResponse(status_code=200, content=b"subtitle-bytes"),
+        ]
+    )
+    client = AssrtClient("token123", session=session, min_interval=0)
+    assert client.download("https://example.com/a.ass") == b"subtitle-bytes"
+    assert len(session.calls) == 2
+
+
+def test_download_does_not_retry_404(monkeypatch):
+    """4xx 是文件本身的问题（没了/没权限），重试只是白等。"""
+    monkeypatch.setattr("src.assrt.client.time.sleep", lambda _seconds: None)
+    session = FakeSession([FakeResponse(status_code=404)])
+    client = AssrtClient("token123", session=session, min_interval=0)
+    with pytest.raises(AssrtError) as excinfo:
+        client.download("https://example.com/gone.ass")
+    assert "HTTP 404" in str(excinfo.value)
+    assert len(session.calls) == 1
+
+
+def test_search_retries_5xx_then_succeeds(monkeypatch):
+    """检索遇到 502 时不能直接抛「返回的不是 JSON（HTTP 502）」。"""
+    monkeypatch.setattr("src.assrt.client.time.sleep", lambda _seconds: None)
+    session = FakeSession([FakeResponse(status_code=502), FakeResponse(SEARCH_PAYLOAD)])
+    client = AssrtClient("token123", session=session, min_interval=0)
+    assert len(client.search("妄想学生会")) == 1
+    assert len(session.calls) == 2

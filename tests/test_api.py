@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -518,6 +520,135 @@ def test_videos_endpoint_reports_missing_dir_clearly(client, tmp_path):
     assert "目录不存在" in body["error"]
 
 
+def test_replace_video_with_output_swaps_files(tmp_path):
+    """替换就是「新文件改名成原文件名」，不留 .subbed.mkv。"""
+    from src.service import replace_video_with_output
+
+    target = tmp_path / "E01.mkv"
+    target.write_bytes(b"old")
+    output = tmp_path / "E01.subbed.mkv"
+    output.write_bytes(b"new-subbed")
+
+    result = replace_video_with_output(target, output, original_size=3)
+    assert result["replaced"] is True
+    assert target.read_bytes() == b"new-subbed"
+    assert not output.exists()
+
+
+def test_replace_refuses_when_new_file_looks_too_small(tmp_path):
+    """新文件明显小于原视频 = mkvmerge 多半少拷了流，这时绝不能删原文件。"""
+    from src.service import replace_video_with_output
+
+    target = tmp_path / "E01.mkv"
+    target.write_bytes(b"v" * 1000)
+    output = tmp_path / "E01.subbed.mkv"
+    output.write_bytes(b"v" * 100)
+
+    result = replace_video_with_output(target, output, original_size=1000)
+    assert result["replaced"] is False
+    assert "没有替换" in result["error"]
+    assert target.read_bytes() == b"v" * 1000
+    assert output.exists()  # 新文件保留，方便人工看一眼
+
+
+def test_replace_reports_missing_output(tmp_path):
+    from src.service import replace_video_with_output
+
+    target = tmp_path / "E01.mkv"
+    target.write_bytes(b"v")
+    result = replace_video_with_output(target, tmp_path / "nope.mkv", original_size=1)
+    assert result["replaced"] is False
+    assert "找不到新生成的文件" in result["error"]
+    assert target.exists()
+
+
+def test_embed_can_replace_original_video(client, tmp_path):
+    """勾上「替换原文件」后，原视频直接换成带字幕的成片。"""
+    video = tmp_path / "E01.mkv"
+    video.write_bytes(b"v" * 1000)
+
+    class OneFileAssrt:
+        def detail(self, sub_id):
+            return {"title": "t", "files": [{"name": "01.ass", "url": "http://x/01.ass"}]}
+
+        def download(self, url):
+            return b"[Script Info]"
+
+    class FakeMkv:
+        def mux_subtitles(self, target, subtitle_files, output, **kwargs):
+            Path(output).write_bytes(b"v" * 1000 + b"sub")
+            return {"output": str(output), "size": 1003, "warnings": False}
+
+    ctx = client.app.dependency_overrides[get_context]()
+    ctx._assrt = OneFileAssrt()
+    ctx._mkv = FakeMkv()
+
+    body = client.post(
+        "/api/subtitle/embed",
+        json={"target": str(video), "sub_id": 1, "replace_original": True},
+    ).json()
+
+    assert body["ok"] is True
+    assert body["replaced"] is True
+    # 返回的路径要指向原文件——那个 .subbed.mkv 已经不存在了
+    assert body["output"] == str(video)
+    assert video.read_bytes() == b"v" * 1000 + b"sub"
+    assert not (tmp_path / "E01.subbed.mkv").exists()
+
+
+def test_embed_keeps_both_files_when_not_replacing(client, tmp_path):
+    """不勾替换：原视频不动，另外生成 .subbed.mkv（老行为不能变）。"""
+    video = tmp_path / "E01.mkv"
+    video.write_bytes(b"v" * 1000)
+
+    class OneFileAssrt:
+        def detail(self, sub_id):
+            return {"title": "t", "files": [{"name": "01.ass", "url": "http://x/01.ass"}]}
+
+        def download(self, url):
+            return b"[Script Info]"
+
+    class FakeMkv:
+        def mux_subtitles(self, target, subtitle_files, output, **kwargs):
+            Path(output).write_bytes(b"v" * 1000 + b"sub")
+            return {"output": str(output), "size": 1003, "warnings": False}
+
+    ctx = client.app.dependency_overrides[get_context]()
+    ctx._assrt = OneFileAssrt()
+    ctx._mkv = FakeMkv()
+
+    body = client.post("/api/subtitle/embed", json={"target": str(video), "sub_id": 1}).json()
+
+    assert body["replaced"] is False
+    assert body["output"] != str(video)
+    assert video.read_bytes() == b"v" * 1000
+    assert (tmp_path / "E01.subbed.mkv").exists()
+
+
+def test_batch_embed_passes_replace_flag_through(client, monkeypatch, tmp_path):
+    path = tmp_path / "E01.mkv"
+    path.write_bytes(b"x")
+    calls = []
+
+    def fake_embed(ctx, **kwargs):
+        calls.append(kwargs)
+        return {"ok": True, "output": "o.mkv", "replaced": kwargs["replace_original"]}
+
+    monkeypatch.setattr("src.service.embed_subtitle", fake_embed)
+    body = client.post(
+        "/api/subtitle/embed-batch",
+        json={
+            "subtitles": [{"name": "01.ass", "url": "u"}],
+            "videos": [str(path)],
+            "replace_original": True,
+        },
+    ).json()
+
+    assert calls[0]["replace_original"] is True
+    assert body["succeeded"] == 1
+    assert body["results"][0]["replaced"] is True
+
+
 def test_batch_embed_reports_partial_failures(client, monkeypatch, tmp_path):
     paths = []
     for name in ("E01.mkv", "E02.mkv"):
@@ -587,6 +718,57 @@ def test_releases_sort_by_seeders(client):
     body = res.json()
     seeders = [i["release"]["seeders"] for i in body["matched"]]
     assert seeders == sorted(seeders, reverse=True)
+
+
+def test_releases_sort_by_date_newest_first(client, ctx):
+    """按发布时间排序：新的在前。nekoBT 和蜜柑共用同一段排序逻辑。"""
+    ctx.nekobt.torrent_rows = [
+        torrent_row("1", "[BD] Frieren - S02 (BD 1080p HEVC)", sub_lang="zh-hans"),
+        torrent_row("2", "[WEB] Frieren - S02 (WEB 1080p H.264)", sub_lang="zh-hans"),
+    ]
+    ctx.nekobt.torrent_rows[0]["uploaded_at"] = 1600000000000  # 旧
+    ctx.nekobt.torrent_rows[1]["uploaded_at"] = 1800000000000  # 新
+
+    body = client.get("/api/media/s462/releases", params={"sort": "date"}).json()
+    assert [i["release"]["torrent_id"] for i in body["matched"]] == ["2", "1"]
+    # 时间戳要透出来，前端才能显示、也才能肉眼校验排序
+    assert body["matched"][0]["release"]["uploaded_at"] == 1800000000000
+
+
+def test_releases_sort_by_date_puts_missing_time_last(client, ctx):
+    """来源没给发布时间的条目沉到末尾，不能把有序的结果打乱。"""
+    ctx.nekobt.torrent_rows = [
+        torrent_row("1", "[BD] Frieren - S02 (BD 1080p HEVC)", sub_lang="zh-hans"),
+        torrent_row("2", "[WEB] Frieren - S02 (WEB 1080p H.264)", sub_lang="zh-hans"),
+    ]
+    ctx.nekobt.torrent_rows[0]["uploaded_at"] = 1600000000000
+    ctx.nekobt.torrent_rows[1]["uploaded_at"] = None
+
+    body = client.get("/api/media/s462/releases", params={"sort": "date"}).json()
+    assert [i["release"]["torrent_id"] for i in body["matched"]] == ["1", "2"]
+
+
+class FakeMikan:
+    def __init__(self, rows):
+        self.rows = rows
+
+    def search(self, keyword, limit=100):
+        return self.rows[:limit]
+
+
+def test_mikan_releases_sort_by_date(client, ctx):
+    ctx._mikan = FakeMikan(
+        [
+            {"title": "[老组] 妄想学生会 (BD 1080p)", "filesize": 100, "uploaded_at": 1600000000000},
+            {"title": "[新组] 妄想学生会 (BD 1080p)", "filesize": 100, "uploaded_at": 1700000000000},
+        ]
+    )
+    body = client.get("/api/mikan/releases", params={"title": "妄想学生会", "sort": "date"}).json()
+    assert body["ok"] is True
+    assert [item["release"]["title"] for item in body["matched"]] == [
+        "[新组] 妄想学生会 (BD 1080p)",
+        "[老组] 妄想学生会 (BD 1080p)",
+    ]
 
 
 def test_download_submits_to_qbittorrent_and_records_history(client, ctx):

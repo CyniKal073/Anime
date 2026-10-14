@@ -140,6 +140,7 @@
       <label>排序
         <select id="sort">
           <option value="preference">按偏好打分</option>
+          <option value="date">按发布时间（新→旧）</option>
           <option value="seeders">按做种数</option>
           <option value="size">按体积（小→大）</option>
         </select>
@@ -261,6 +262,12 @@
       <label class="check">
         <input id="subDefault" type="checkbox" checked> 设为默认字幕
       </label>
+      <!-- 勾上后用新文件顶替原视频：省一半空间，但原文件就没了（不可逆）。
+           嵌字幕只是往容器里加一条轨道，新文件理应不比原文件小；
+           明显变小的话后端会拒绝替换，只会留下新文件。 -->
+      <label class="check">
+        <input id="subReplace" type="checkbox"> 嵌入后替换原文件（省空间，不可逆）
+      </label>
       <label>输出文件名
         <input id="subOutput" placeholder="留空 = 原名.subbed.mkv">
       </label>
@@ -312,6 +319,11 @@
     </div>
     <div class="pd-foot">
       <span class="muted" id="batchSummary">左右各勾选一样多的文件，按顺序一一配对</span>
+      <!-- 一组一组地嵌：每嵌完一组就把原视频换成带字幕的新文件，
+           这样处理一整季也不会占双份空间（原文件不可恢复，先小批量试）。 -->
+      <label class="check">
+        <input id="batchReplace" type="checkbox"> 每组嵌入后替换原文件（省空间，不可逆）
+      </label>
       <button id="batchRun" class="primary" type="button">开始批量嵌入</button>
     </div>
   </dialog>

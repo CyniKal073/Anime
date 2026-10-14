@@ -461,6 +461,15 @@ function renderResults() {
   rows.forEach((item, index) => tbody.appendChild(renderRow(item, index)));
 }
 
+/** 毫秒时间戳 → 「2024-05-01」。来源没给时间就返回空串，让调用方过滤掉。 */
+function formatDate(ms) {
+  if (!ms) return "";
+  const d = new Date(ms);
+  if (isNaN(d.getTime())) return "";
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+}
+
 function renderRow(item, index) {
   const rel = item.release;
   const tr = document.createElement("tr");
@@ -482,6 +491,8 @@ function renderRow(item, index) {
     rel.episode ? "EP " + rel.episode : null,
     rel.season ? "S" + rel.season : null,
     rel.upgraded ? "升级版" : null,
+    // 发布时间：既方便挑最新的，也是「按发布时间排序」的肉眼校验
+    formatDate(rel.uploaded_at) || null,
   ].filter(Boolean).join(" · ");
   titleTd.appendChild(name);
   if (meta.textContent) titleTd.appendChild(meta);
@@ -755,36 +766,83 @@ async function loadBatchVideos() {
   }
 }
 
+/* 一次请求里嵌几组。
+
+   嵌一组就要跑一次 mkvmerge，整季十几组装进一个请求的话，界面会长时间停在
+   「嵌入中（0/12）…」一动不动，中途出问题还会把整批结果一起丢掉。
+   拆成小批逐个请求：进度能一组一组地报，某一批出问题也不牵连其它批。 */
+const BATCH_CHUNK = 3;
+
 async function runBatchEmbed() {
   if (batchSubsSel.length !== batchVideosSel.length || !batchSubsSel.length) {
     toast("两边数量要一样多，且不能为空");
     return;
   }
+  const total = batchSubsSel.length;
+  const replace = $("batchReplace").checked;
   const btn = $("batchRun");
   btn.disabled = true;
-  btn.textContent = `嵌入中（0/${batchSubsSel.length}）…`;
+  const results = [];
   try {
-    const r = await api("/api/subtitle/embed-batch", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        subtitles: batchSubsSel.map((s) => ({ name: s.file_name, url: s.file_url })),
-        videos: batchVideosSel.map((v) => v.path),
-        language: $("subLang").value,
-        make_default: $("subDefault").checked,
-      }),
-    });
-    const failed = (r.results || []).filter((item) => !item.ok);
-    toast(`完成 ${r.succeeded}/${r.total} 组${failed.length ? "，有失败项" : ""}`, failed.length ? "bad" : "ok");
-    failed.forEach((item) => toast(`第 ${item.index} 组失败：${item.error}`, "bad"));
-    loadLibrary();
-    if (!failed.length) $("batchDialog").close();
-  } catch (err) {
-    toast("批量嵌入失败：" + err.message, "bad");
+    for (let start = 0; start < total; start += BATCH_CHUNK) {
+      const stop = Math.min(start + BATCH_CHUNK, total);
+      btn.textContent = `嵌入中（${start + 1}–${stop}/${total}）…`;
+      try {
+        const r = await api("/api/subtitle/embed-batch", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            subtitles: batchSubsSel
+              .slice(start, stop)
+              .map((s) => ({ name: s.file_name, url: s.file_url })),
+            videos: batchVideosSel.slice(start, stop).map((v) => v.path),
+            language: $("subLang").value,
+            make_default: $("subDefault").checked,
+            replace_original: replace,
+          }),
+        });
+        (r.results || []).forEach((item, i) => {
+          // 每批的编号都是从 1 起算的，换算成整批里的序号
+          results.push({ ...item, index: start + i + 1 });
+        });
+      } catch (err) {
+        // 这一批没回话，但服务端很可能还在跑（mkvmerge 是子进程，连接断了它
+        // 也不会停）。所以记成「不确定」而不是「失败」，免得让人以为白跑了。
+        for (let i = start; i < stop; i += 1) {
+          results.push({
+            index: i + 1,
+            video: batchVideosSel[i].path,
+            ok: false,
+            error: `请求中断（${err.message}）——这一组可能仍在后台嵌，稍后刷新视频文件夹确认`,
+          });
+        }
+      }
+    }
+    reportBatchResults(results);
   } finally {
     btn.disabled = false;
     btn.textContent = "开始批量嵌入";
   }
+}
+
+/** 把整批结果汇总成几句人话：嵌好几组、替换了几组、哪几组有问题。 */
+function reportBatchResults(results) {
+  const total = results.length;
+  const failed = results.filter((item) => !item.ok);
+  const replaceFailed = results.filter((item) => item.replace_error);
+  const replaced = results.filter((item) => item.replaced).length;
+  const ok = total - failed.length;
+  const extra = [
+    replaced ? `已替换原文件 ${replaced} 组` : null,
+    replaceFailed.length ? `有 ${replaceFailed.length} 组没能替换` : null,
+  ].filter(Boolean).join("，");
+
+  toast(`完成 ${ok}/${total} 组${extra ? "（" + extra + "）" : ""}`, failed.length ? "bad" : "ok");
+  failed.forEach((item) => toast(`第 ${item.index} 组：${item.error}`, "bad"));
+  replaceFailed.forEach((item) => toast(`第 ${item.index} 组替换失败：${item.replace_error}`, "bad"));
+  $("batchSummary").textContent = `完成 ${ok}/${total} 组${extra ? "，" + extra : ""}`;
+  loadLibrary();
+  if (!failed.length) $("batchDialog").close();
 }
 
 /* ---------------------------------------------------------- 在线字幕（射手网） */
@@ -941,6 +999,7 @@ async function embedAssrt(item, btn) {
         track_name: item.lang_label || null,
         output: $("subOutput").value.trim() || null,
         make_default: $("subDefault").checked,
+        replace_original: $("subReplace").checked,
       }),
     });
     if (!r.ok) {
@@ -950,7 +1009,12 @@ async function embedAssrt(item, btn) {
       return;
     }
     btn.textContent = "已嵌入";
-    toast(`已生成：${r.output}\n字幕 ${r.subtitle_size} 字节，成片 ${r.output_size_text}`, "ok");
+    toast(
+      `已生成：${r.output}${r.replaced ? "（已替换原文件）" : ""}\n` +
+        `字幕 ${r.subtitle_size} 字节，成片 ${r.output_size_text}`,
+      "ok"
+    );
+    if (r.replace_error) toast("替换原文件没成功：" + r.replace_error, "bad");
     loadLibrary();
   } catch (err) {
     toast("嵌入失败：" + err.message, "bad");
@@ -1221,13 +1285,18 @@ async function mergeSubtitles() {
         track_name: $("subTrackName").value.trim() || null,
         output: $("subOutput").value.trim() || null,
         make_default: $("subDefault").checked,
+        replace_original: $("subReplace").checked,
       }),
     });
     if (!r.ok) {
       toast("合并失败：" + r.error, "bad");
       return;
     }
-    toast(`已生成：${r.output}\n体积 ${r.output_size_text}`, "ok");
+    toast(
+      `已生成：${r.output}${r.replaced ? "（已替换原文件）" : ""}\n体积 ${r.output_size_text}`,
+      "ok"
+    );
+    if (r.replace_error) toast("替换原文件没成功：" + r.replace_error, "bad");
     loadLibrary();
   } catch (err) {
     toast("合并失败：" + err.message, "bad");
