@@ -129,6 +129,7 @@ def ctx(tmp_path, monkeypatch):
         qbit_savepath=r"D:\Anime\library",
         db_path=tmp_path / "test.db",
         cache_dir=tmp_path / "cache",
+        assrt_min_interval=0,
     )
     context = ServiceContext(
         settings=settings,

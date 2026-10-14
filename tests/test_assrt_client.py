@@ -55,7 +55,8 @@ SEARCH_PAYLOAD = {
 
 def test_search_normalizes_items():
     session = FakeSession([FakeResponse(SEARCH_PAYLOAD)])
-    client = AssrtClient("token123", session=session)
+    # 测试里关掉请求间隔，否则每次调用都要真等 12 秒
+    client = AssrtClient("token123", session=session, min_interval=0)
 
     items = client.search("妄想学生会")
 
@@ -76,20 +77,20 @@ def test_search_normalizes_items():
 def test_search_rejects_too_short_query():
     """文档：q 至少 3 个字符。"""
     session = FakeSession([])
-    client = AssrtClient("token123", session=session)
+    client = AssrtClient("token123", session=session, min_interval=0)
     assert client.search("ab") == []
     assert session.calls == []
 
 
 def test_count_is_clamped_to_documented_max():
     session = FakeSession([FakeResponse(SEARCH_PAYLOAD)])
-    client = AssrtClient("token123", session=session)
+    client = AssrtClient("token123", session=session, min_interval=0)
     client.search("妄想学生会", count=99)
     assert session.calls[0]["params"]["cnt"] == 15
 
 
 def test_missing_token_says_what_to_do():
-    client = AssrtClient("", session=FakeSession([]))
+    client = AssrtClient("", session=FakeSession([]), min_interval=0)
     with pytest.raises(AssrtError) as excinfo:
         client.search("妄想学生会")
     message = str(excinfo.value)
@@ -99,7 +100,7 @@ def test_missing_token_says_what_to_do():
 
 def test_api_error_status_becomes_readable():
     session = FakeSession([FakeResponse({"status": 20001, "errmsg": "invalid token"})])
-    client = AssrtClient("bad", session=session)
+    client = AssrtClient("bad", session=session, min_interval=0)
     with pytest.raises(AssrtError) as excinfo:
         client.search("妄想学生会")
     assert "invalid token" in str(excinfo.value)
@@ -115,7 +116,7 @@ def test_detail_extracts_file_list():
         },
     }
     session = FakeSession([FakeResponse(payload)])
-    client = AssrtClient("token123", session=session)
+    client = AssrtClient("token123", session=session, min_interval=0)
 
     detail = client.detail(123456)
     assert detail["files"] == [{"name": "seitokai.ass", "url": "https://example.com/a.ass"}]
@@ -124,14 +125,14 @@ def test_detail_extracts_file_list():
 def test_detail_tolerates_list_shaped_sub():
     payload = {"status": 0, "sub": [{"id": 1, "filelist": ["https://example.com/b.srt"]}]}
     session = FakeSession([FakeResponse(payload)])
-    client = AssrtClient("token123", session=session)
+    client = AssrtClient("token123", session=session, min_interval=0)
     detail = client.detail(1)
     assert detail["files"] == [{"name": "https://example.com/b.srt", "url": "https://example.com/b.srt"}]
 
 
 def test_empty_search_returns_nothing_without_request():
     session = FakeSession([])
-    client = AssrtClient("token123", session=session)
+    client = AssrtClient("token123", session=session, min_interval=0)
     assert client.search("   ") == []
     assert session.calls == []
 

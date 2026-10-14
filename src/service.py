@@ -25,6 +25,7 @@ from .nekobt.media import (
     classify_confidence,
     rank_candidates,
     search_media,
+    to_traditional,
 )
 from .qbittorrent.client import QBittorrentClient, QBittorrentError
 from .qbittorrent.launcher import ensure_running
@@ -676,10 +677,30 @@ def assrt_search(
             "items": [],
             "error": "未配置射手网 token：请到 assrt.net 登录后获取，填进 .env 的 ASSRT_TOKEN",
         }
-    try:
-        items = ctx.assrt.search(query, count=max(1, min(count, 30)), page=max(0, pos))
-    except AssrtError as exc:
-        return {"ok": False, "configured": True, "items": [], "error": str(exc)}
+    # 实测：射手网的搜索对简繁敏感——同一个词用简体查和用繁体查返回的是两批不同
+    # 结果（繁体字幕的条目只在繁体查询里出现）。所以两边都查再按 sub_id 合并。
+    # 代价是每次搜索消耗 2 次配额。
+    variants = [query]
+    traditional = to_traditional(query)
+    if traditional and traditional != query:
+        variants.append(traditional)
+
+    merged: Dict[Any, Dict[str, Any]] = {}
+    errors: List[str] = []
+    for variant in variants:
+        try:
+            rows = ctx.assrt.search(variant, count=max(1, min(count, 30)), page=max(0, pos))
+        except AssrtError as exc:
+            errors.append(str(exc))
+            continue
+        for item in rows:
+            key = item.get("sub_id")
+            if key is not None and key not in merged:
+                merged[key] = item
+
+    if not merged and errors:
+        return {"ok": False, "configured": True, "items": [], "error": errors[0]}
+    items: List[Dict[str, Any]] = list(merged.values())
     for item in items:
         item["lang_label"] = " / ".join(
             ASSRT_LANG_LABEL.get(code, code) for code in (item.get("langs") or [])

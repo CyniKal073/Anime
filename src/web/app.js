@@ -881,10 +881,9 @@ function assrtRow(item) {
     item.sub_id ? `#${item.sub_id}` : "⚠ 无编号",
     item.lang_label || (item.langs || []).map((c) => ASSRT_LANG[c] || c).join("/"),
     (item.format || "").toUpperCase(),
-    // 评分要带上人数：只有 1 个人评的 100 分和 5 个人评的 62 分不是一回事
-    item.score
-      ? `评分 ${item.score}${item.score_count ? `（${item.score_count} 人）` : ""}`
-      : null,
+    // 不显示 API 的 score：实测它与网站上的「字幕评分」对不上（网站是 10 分制、
+    // 人数也不同）。一个和用户认知不符的数字，比没有数字更糟。
+    null,
     item.upload_time ? item.upload_time.slice(0, 10) : null,
     item.release_site,
   ].filter(Boolean).join(" · ");
@@ -893,6 +892,10 @@ function assrtRow(item) {
 
   // 把接口给的其余信息也摊开：别的名字、修订版、下载/浏览数
   const extra = [];
+  // 整包还是单集——老 BD 资源常常只能靠整包配字幕，这个信息很关键
+  if (item.is_pack === true || item.is_pack === 1 || item.is_pack === "1") {
+    extra.push("📦 整包");
+  }
   const aliases = [item.native_name, item.videoname, item.sub_name].filter(
     (name) => name && name !== item.title
   );
