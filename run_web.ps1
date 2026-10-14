@@ -8,6 +8,10 @@
 #   .\run_web.ps1 -Port 9000         # 换端口
 #   .\run_web.ps1 -NoAccessLog       # 只保留启动日志，不刷每条请求
 #   .\run_web.ps1 -Addr 0.0.0.0      # 换监听地址
+#   .\run_web.ps1 -Reload            # 改代码后自动重载（开发时常开）
+#
+# 改了后端代码（src/*.py）一定要重启，否则前端会调用到不存在的接口，
+# 表现就是各种「载入失败」「Not Found」——开着 -Reload 可以免掉这一坑。
 #
 # 注意参数名是 -Addr 而不是 -Host：$Host 是 PowerShell 的内置只读变量
 # （表示宿主程序），拿它当参数名会在绑定参数时报
@@ -15,6 +19,7 @@
 
 param(
     [switch]$NoAccessLog,
+    [switch]$Reload,
     [int]$Port = 8765,
     [string]$Addr = "127.0.0.1"
 )
@@ -25,6 +30,7 @@ $env:PYTHONIOENCODING = "utf-8"
 
 $arguments = @("-m", "src.api.app", "--host", $Addr, "--port", "$Port")
 if ($NoAccessLog) { $arguments += "--no-access-log" }
+if ($Reload) { $arguments += "--reload" }
 
 Write-Host "启动 Web UI: http://${Addr}:${Port}" -ForegroundColor Cyan
 python @arguments
