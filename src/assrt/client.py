@@ -24,7 +24,13 @@ from ..net import build_session
 
 ASSRT_SOURCE = "assrt"
 BASE_URL = "https://api.assrt.net/v1"
+#: 文档里写明的替代域名（原文：「由于网络原因，也可以使用以下替代域名访问」）
+ALTERNATE_BASE_URL = "https://api.makedie.me/v1"
 DEFAULT_USER_AGENT = "anime-release-manager/0.1 (https://github.com/CyniKal073)"
+
+#: 文档：q 至少 3 个字符；cnt 最多一次返回 15 个
+MIN_QUERY_LENGTH = 3
+MAX_COUNT = 15
 
 #: langlist 里的键 → 我们内部用的语言代码
 _LANG_KEYS = {
@@ -75,9 +81,16 @@ class AssrtClient:
         self.user_agent = user_agent
         self._last_request = 0.0
 
-    #: 两次请求之间的最小间隔（秒）。实测连发会被限流
-    #: （报 "you are exceeding request limits"），拉开一点更稳。
-    MIN_INTERVAL = 1.5
+    #: 两次请求之间的最小间隔（秒）。文档：配额 20 次/分钟，且 token 与 IP 共享，
+    #: 所以最稳的做法是 3 秒一次（20/分钟）。实测连发会报
+    #: "you are exceeding request limits"。
+    MIN_INTERVAL = 3.0
+
+    def _bases(self) -> List[str]:
+        bases = [self.base_url]
+        if "api.assrt.net" in self.base_url:
+            bases.append(ALTERNATE_BASE_URL)
+        return bases
 
     # ------------------------------------------------------------------ 内部
 
@@ -89,33 +102,40 @@ class AssrtClient:
                 "未配置射手网 token。请到 assrt.net 登录后获取 API token，"
                 "填进 .env 的 ASSRT_TOKEN。"
             )
-        query = {"token": self.token, **{k: v for k, v in params.items() if v is not None}}
-        url = f"{self.base_url}{path}"
+        # 文档给了两种传法，这里用 Authorization 头：token 不会出现在
+        # URL 里，也就不会被打进日志或异常信息（之前就泄漏过一次）。
+        headers = {
+            "User-Agent": self.user_agent,
+            "Accept": "application/json",
+            "Authorization": f"Bearer {self.token}",
+        }
+        query = {k: v for k, v in params.items() if v is not None}
 
         gap = time.time() - self._last_request
         if gap < self.MIN_INTERVAL:
             time.sleep(self.MIN_INTERVAL - gap)
 
-        # 实测这条链路不稳定：直连/代理都可能出现 SSL EOF，重试几次就能过。
+        # 实测这条链路不稳定：直连/代理都可能出现 SSL EOF，重试几次就能过；
+        # 主域名持续失败时换文档给的替代域名再试。
         response = None
         last_error: Optional[Exception] = None
-        for attempt in range(1, max(1, attempts) + 1):
-            try:
-                self._last_request = time.time()
-                response = self.session.get(
-                    url,
-                    params=query,
-                    headers={"User-Agent": self.user_agent, "Accept": "application/json"},
-                    timeout=self.timeout,
-                )
+        for base in self._bases():
+            url = f"{base}{path}"
+            for attempt in range(1, max(1, attempts) + 1):
+                try:
+                    self._last_request = time.time()
+                    response = self.session.get(
+                        url, params=query, headers=headers, timeout=self.timeout
+                    )
+                    break
+                except requests.RequestException as exc:
+                    last_error = exc
+                    if attempt < attempts:
+                        time.sleep(1.5 * attempt)
+            if response is not None:
                 break
-            except requests.RequestException as exc:
-                last_error = exc
-                if attempt >= attempts:
-                    raise AssrtError(f"射手网请求失败（已重试 {attempts} 次）：{exc}") from exc
-                time.sleep(1.5 * attempt)
-        if response is None:  # pragma: no cover - 上面必然抛异常
-            raise AssrtError(f"射手网请求失败：{last_error}")
+        if response is None:
+            raise AssrtError(f"射手网请求失败（主备域名都试过了）：{last_error}")
 
         try:
             payload = response.json()
@@ -132,9 +152,12 @@ class AssrtClient:
     def search(self, query: str, *, count: int = 15, page: int = 0) -> List[Dict[str, Any]]:
         """按关键词搜字幕，返回归一化后的条目列表。"""
         query = (query or "").strip()
-        if not query:
+        # 文档：q 至少 3 个字符，cnt 最多 15
+        if len(query) < MIN_QUERY_LENGTH:
             return []
-        payload = self._get("/sub/search", {"q": query, "cnt": count, "pos": page})
+        payload = self._get(
+            "/sub/search", {"q": query, "cnt": max(1, min(count, MAX_COUNT)), "pos": page}
+        )
         block = payload.get("sub") or {}
         rows = block.get("subs") or []
 

@@ -66,15 +66,32 @@ def test_search_normalizes_items():
     assert item["format"] == "ass"
     assert item["langs"] == ["zh_chs"]
     assert item["lang_desc"] == "简体"
-    # token 与关键词都带上了
-    assert session.calls[0]["params"]["token"] == "token123"
+    # token 走 Authorization 头（不进 URL，避免被日志记录），关键词走参数
+    assert session.calls[0]["headers"]["Authorization"] == "Bearer token123"
+    assert "token" not in session.calls[0]["params"]
     assert session.calls[0]["params"]["q"] == "妄想学生会"
+    assert session.calls[0]["params"]["cnt"] <= 15  # 文档：cnt 最多 15
+
+
+def test_search_rejects_too_short_query():
+    """文档：q 至少 3 个字符。"""
+    session = FakeSession([])
+    client = AssrtClient("token123", session=session)
+    assert client.search("ab") == []
+    assert session.calls == []
+
+
+def test_count_is_clamped_to_documented_max():
+    session = FakeSession([FakeResponse(SEARCH_PAYLOAD)])
+    client = AssrtClient("token123", session=session)
+    client.search("妄想学生会", count=99)
+    assert session.calls[0]["params"]["cnt"] == 15
 
 
 def test_missing_token_says_what_to_do():
     client = AssrtClient("", session=FakeSession([]))
     with pytest.raises(AssrtError) as excinfo:
-        client.search("x")
+        client.search("妄想学生会")
     message = str(excinfo.value)
     assert "ASSRT_TOKEN" in message
     assert client.is_configured() is False
@@ -84,7 +101,7 @@ def test_api_error_status_becomes_readable():
     session = FakeSession([FakeResponse({"status": 20001, "errmsg": "invalid token"})])
     client = AssrtClient("bad", session=session)
     with pytest.raises(AssrtError) as excinfo:
-        client.search("x")
+        client.search("妄想学生会")
     assert "invalid token" in str(excinfo.value)
 
 
