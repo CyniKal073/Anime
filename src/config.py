@@ -84,6 +84,9 @@ class Settings:
     mkv_tools_dir: str = DEFAULT_MKV_TOOLS_DIR
     #: 射手网 API token（assrt.net 登录后获取）
     assrt_token: Optional[str] = None
+    #: 射手网两次请求的最小间隔（秒）。官方文档说 20 次/分钟，实际配额因人而异
+    #: （实测有 5 次/分钟 = 12 秒），默认取保守值。
+    assrt_min_interval: float = 12.0
 
     http_timeout: float = 20.0
     http_retries: int = 3
@@ -114,6 +117,7 @@ class Settings:
             qbit_executable=raw("QBIT_EXECUTABLE", DEFAULT_QBIT_EXE) or DEFAULT_QBIT_EXE,
             mkv_tools_dir=raw("MKV_TOOLS_DIR", DEFAULT_MKV_TOOLS_DIR) or DEFAULT_MKV_TOOLS_DIR,
             assrt_token=raw("ASSRT_TOKEN"),
+            assrt_min_interval=_get_float(source, "ASSRT_MIN_INTERVAL", 12.0),
             http_timeout=_get_float(source, "HTTP_TIMEOUT", 20.0),
             http_retries=_get_int(source, "HTTP_RETRIES", 3),
             user_agent=raw("HTTP_USER_AGENT", "anime-release-manager/0.1") or "anime-release-manager/0.1",

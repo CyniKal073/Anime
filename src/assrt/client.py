@@ -73,18 +73,21 @@ class AssrtClient:
         session: Optional[Any] = None,
         timeout: float = 25.0,
         user_agent: str = DEFAULT_USER_AGENT,
+        min_interval: float = 12.0,
     ) -> None:
         self.token = (token or "").strip()
         self.base_url = base_url.rstrip("/")
         self.session = session if session is not None else build_session()
         self.timeout = timeout
         self.user_agent = user_agent
+        self.min_interval = max(0.0, float(min_interval))
         self._last_request = 0.0
 
-    #: 两次请求之间的最小间隔（秒）。文档：配额 20 次/分钟，且 token 与 IP 共享，
-    #: 所以最稳的做法是 3 秒一次（20/分钟）。实测连发会报
-    #: "you are exceeding request limits"。
-    MIN_INTERVAL = 3.0
+    #: 两次请求之间的最小间隔（秒）。官方文档写「初始配额 20 次/分钟」，
+    #: 但实际配额因人而异——实测账号可能只有 5 次/分钟（每 12 秒一次），
+    #: 超了会报 "you are exceeding request limits"。默认按最保守的 12 秒，
+    #: 可用 .env 的 ASSRT_MIN_INTERVAL 调整。
+    DEFAULT_MIN_INTERVAL = 12.0
 
     def _bases(self) -> List[str]:
         bases = [self.base_url]
@@ -112,8 +115,8 @@ class AssrtClient:
         query = {k: v for k, v in params.items() if v is not None}
 
         gap = time.time() - self._last_request
-        if gap < self.MIN_INTERVAL:
-            time.sleep(self.MIN_INTERVAL - gap)
+        if gap < self.min_interval:
+            time.sleep(self.min_interval - gap)
 
         # 实测这条链路不稳定：直连/代理都可能出现 SSL EOF，重试几次就能过；
         # 主域名持续失败时换文档给的替代域名再试。

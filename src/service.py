@@ -262,6 +262,7 @@ class ServiceContext:
             self._assrt = AssrtClient(
                 self.settings.assrt_token,
                 user_agent=f"{self.settings.user_agent} (https://github.com/CyniKal073)",
+                min_interval=self.settings.assrt_min_interval,
             )
         return self._assrt
 
