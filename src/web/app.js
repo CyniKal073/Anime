@@ -39,10 +39,30 @@ async function api(path, options) {
         "接口不存在（服务可能是旧版本）。请重启服务：关掉终端里的进程，重新运行 .\\run_web.ps1 -Reload"
       );
     }
-    const detail = body && body.detail ? body.detail : res.status + " " + res.statusText;
-    throw new Error(detail);
+    throw new Error(describeApiError(body, res));
   }
   return body;
+}
+
+/**
+ * 把后端的错误变成人能读的字符串。
+ *
+ * FastAPI 的参数校验失败返回 {detail: [{loc, msg, type}, ...]}，
+ * 早期直接 new Error(detail) 会被拼成「[object Object]」——信息全丢，
+ * 排查时只能靠猜。这里显式处理数组与对象两种情况。
+ */
+function describeApiError(body, res) {
+  const detail = body && body.detail;
+  if (typeof detail === "string") return detail;
+  if (Array.isArray(detail)) {
+    const parts = detail.map((item) => {
+      const where = Array.isArray(item && item.loc) ? item.loc.join(".") : "";
+      return `${where} ${(item && item.msg) || ""}`.trim();
+    });
+    return parts.filter(Boolean).join("；") || JSON.stringify(detail);
+  }
+  if (detail) return JSON.stringify(detail);
+  return `${res.status} ${res.statusText}`;
 }
 
 function toast(message, kind) {
@@ -1164,11 +1184,17 @@ function applyCalendarCollapsed(collapsed) {
 
 /** 从搜索结果进入批量嵌入：先把该条目的字幕文件载进来，再让用户配视频。 */
 async function openBatchForItem(item) {
+  // 没有有效字幕 id 就没法载入文件，先挡住并说清原因（而不是发个空请求换回 422）
+  const subId = Number(item && item.sub_id);
+  if (!subId) {
+    toast("这条搜索结果没有字幕编号，请重新搜索一次再点「嵌入」", "bad");
+    return;
+  }
   try {
     const r = await api("/api/subtitle/files", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ sub_id: item.sub_id }),
+      body: JSON.stringify({ sub_id: subId }),
     });
     if (!r.ok) {
       toast("载入字幕文件失败：" + (r.error || ""), "bad");
