@@ -9,12 +9,23 @@ import pytest
 from src.net import IPv6FirstAdapter, IPv6FirstHTTPSConnection, build_session
 
 
-def test_build_session_mounts_ipv6_first_adapter():
-    session = build_session()
-    adapter = session.get_adapter("https://nekobt.to")
-    assert isinstance(adapter, IPv6FirstAdapter)
+def test_build_session_mounts_ipv6_first_adapter_when_direct():
+    """直连时才挂自定义适配器（DNS 可能被污染，需要自己挑地址族）。"""
+    session = build_session(proxy="")
+    assert isinstance(session.get_adapter("https://nekobt.to"), IPv6FirstAdapter)
     # HTTP 不走这个适配器
     assert not isinstance(session.get_adapter("http://example.com"), IPv6FirstAdapter)
+
+
+def test_build_session_skips_custom_adapter_when_using_proxy():
+    """走代理时不挂自定义适配器——它会破坏代理隧道（实测 SSLEOFError）。
+
+    而且走代理时 DNS 由代理解析，地址族选择本来就不归我们管。
+    """
+    session = build_session(proxy="http://127.0.0.1:10809")
+    assert not isinstance(session.get_adapter("https://api.assrt.net"), IPv6FirstAdapter)
+    assert session.proxies["https"] == "http://127.0.0.1:10809"
+    assert session.proxies["http"] == "http://127.0.0.1:10809"
 
 
 def test_connection_tries_ipv6_before_ipv4(monkeypatch):

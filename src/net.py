@@ -179,6 +179,11 @@ def build_session(proxy: Optional[str] = None) -> requests.Session:
     ``proxy`` 传空字符串表示「强制不使用代理」，传 None 表示自动探测。
     """
     session = requests.Session()
-    session.mount("https://", IPv6FirstAdapter())
-    apply_proxy(session, detect_system_proxy() if proxy is None else proxy)
+    effective = detect_system_proxy() if proxy is None else proxy
+    if not effective:
+        # 只有直连时才需要自己挑地址族：DNS 被污染时 IPv4 会解析到错误的 IP。
+        # 走代理时这件事由代理负责，而且自定义连接会破坏代理隧道
+        # （实测 api.assrt.net 走代理时报 SSLEOFError，去掉适配器就正常）。
+        session.mount("https://", IPv6FirstAdapter())
+    apply_proxy(session, effective)
     return session

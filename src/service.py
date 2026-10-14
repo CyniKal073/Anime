@@ -723,7 +723,11 @@ def embed_subtitle(
         suffix = ".ass"
     work_dir = Path(ctx.settings.cache_dir).parent / "subtitles"
     work_dir.mkdir(parents=True, exist_ok=True)
-    stamp = sub_id if sub_id is not None else "url"
+    # 文件名里带上来源标识，便于在 data/subtitles/ 里认出这堆文件是哪来的
+    if sub_id is not None:
+        stamp = str(sub_id)
+    else:
+        stamp = Path(name or "file").stem[:30] or "url"
     subtitle_file = work_dir / f"assrt_{stamp}_{target_path.stem[:40]}{suffix}"
     subtitle_file.write_bytes(content)
 

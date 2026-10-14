@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import time
 from typing import Any, Dict, List, Optional
 
 import requests
@@ -24,6 +25,15 @@ from ..net import build_session
 ASSRT_SOURCE = "assrt"
 BASE_URL = "https://api.assrt.net/v1"
 DEFAULT_USER_AGENT = "anime-release-manager/0.1 (https://github.com/CyniKal073)"
+
+#: langlist 里的键 → 我们内部用的语言代码
+_LANG_KEYS = {
+    "langchs": "zh_chs",
+    "langcht": "zh_cht",
+    "langeng": "en",
+    "langjpn": "jpn",
+    "langjap": "jpn",
+}
 
 
 class AssrtError(RuntimeError):
@@ -36,6 +46,16 @@ def _as_list(value: Any) -> List[str]:
     if isinstance(value, (list, tuple)):
         return [str(item) for item in value if item]
     return [str(value)]
+
+
+def _langs_from(lang: Any) -> List[str]:
+    """``langlist`` 实测是对象（{"langchs": true}），不是数组。"""
+    if not isinstance(lang, dict):
+        return []
+    raw = lang.get("langlist")
+    if isinstance(raw, dict):
+        return [_LANG_KEYS.get(key, key) for key, enabled in raw.items() if enabled]
+    return [_LANG_KEYS.get(item, item) for item in _as_list(raw)]
 
 
 class AssrtClient:
@@ -53,10 +73,17 @@ class AssrtClient:
         self.session = session if session is not None else build_session()
         self.timeout = timeout
         self.user_agent = user_agent
+        self._last_request = 0.0
+
+    #: 两次请求之间的最小间隔（秒）。实测连发会被限流
+    #: （报 "you are exceeding request limits"），拉开一点更稳。
+    MIN_INTERVAL = 1.5
 
     # ------------------------------------------------------------------ 内部
 
-    def _get(self, path: str, params: Dict[str, Any]) -> Dict[str, Any]:
+    def _get(
+        self, path: str, params: Dict[str, Any], *, attempts: int = 4
+    ) -> Dict[str, Any]:
         if not self.token:
             raise AssrtError(
                 "未配置射手网 token。请到 assrt.net 登录后获取 API token，"
@@ -64,15 +91,31 @@ class AssrtClient:
             )
         query = {"token": self.token, **{k: v for k, v in params.items() if v is not None}}
         url = f"{self.base_url}{path}"
-        try:
-            response = self.session.get(
-                url,
-                params=query,
-                headers={"User-Agent": self.user_agent, "Accept": "application/json"},
-                timeout=self.timeout,
-            )
-        except requests.RequestException as exc:
-            raise AssrtError(f"射手网请求失败：{exc}") from exc
+
+        gap = time.time() - self._last_request
+        if gap < self.MIN_INTERVAL:
+            time.sleep(self.MIN_INTERVAL - gap)
+
+        # 实测这条链路不稳定：直连/代理都可能出现 SSL EOF，重试几次就能过。
+        response = None
+        last_error: Optional[Exception] = None
+        for attempt in range(1, max(1, attempts) + 1):
+            try:
+                self._last_request = time.time()
+                response = self.session.get(
+                    url,
+                    params=query,
+                    headers={"User-Agent": self.user_agent, "Accept": "application/json"},
+                    timeout=self.timeout,
+                )
+                break
+            except requests.RequestException as exc:
+                last_error = exc
+                if attempt >= attempts:
+                    raise AssrtError(f"射手网请求失败（已重试 {attempts} 次）：{exc}") from exc
+                time.sleep(1.5 * attempt)
+        if response is None:  # pragma: no cover - 上面必然抛异常
+            raise AssrtError(f"射手网请求失败：{last_error}")
 
         try:
             payload = response.json()
@@ -101,12 +144,16 @@ class AssrtClient:
             items.append(
                 {
                     "sub_id": row.get("id"),
-                    "title": row.get("native_name") or row.get("filename") or "",
+                    # 实测字段：native_name 经常为空，退回 videoname / sub_name
+                    "title": row.get("native_name")
+                    or row.get("sub_name")
+                    or row.get("videoname")
+                    or "",
                     "filename": row.get("filename") or "",
-                    "format": (row.get("format") or "").lower() or None,
-                    "langs": _as_list(lang.get("langlist") if isinstance(lang, dict) else lang),
+                    "format": (row.get("subtype") or row.get("format") or "").lower() or None,
+                    "langs": _langs_from(lang),
                     "lang_desc": (lang.get("desc") if isinstance(lang, dict) else None) or "",
-                    "score": row.get("score"),
+                    "score": row.get("vote_score", row.get("score")),
                     "upload_time": row.get("upload_time") or "",
                     "release_site": row.get("release_site") or "",
                 }
@@ -117,9 +164,15 @@ class AssrtClient:
         """取字幕详情，重点是里面的文件列表（下载地址）。"""
         payload = self._get("/sub/detail", {"id": sub_id})
         block = payload.get("sub") or {}
-        # 详情接口的 sub 有时是对象，有时是单元素列表
-        if isinstance(block, list):
+        # 实测：详情也是 sub.subs 数组（和搜索一致），不是直接的 sub 对象
+        if isinstance(block, dict):
+            rows = block.get("subs")
+            if isinstance(rows, list):
+                block = rows[0] if rows else {}
+            # 没有 subs 时，block 本身可能就是条目
+        elif isinstance(block, list):
             block = block[0] if block else {}
+
         files = []
         for item in block.get("filelist") or []:
             if isinstance(item, dict):
@@ -128,7 +181,11 @@ class AssrtClient:
                 files.append({"name": item, "url": item})
         return {
             "sub_id": block.get("id", sub_id),
-            "title": block.get("native_name") or "",
+            "title": block.get("title") or block.get("native_name") or "",
+            "subtype": (block.get("subtype") or "").lower() or None,
+            "size": block.get("size"),
+            #: 整包下载地址（可能是 zip，所以优先用 filelist 里的单个文件）
+            "package_url": block.get("url") or "",
             "files": [item for item in files if item["url"]],
         }
 
