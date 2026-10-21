@@ -203,6 +203,11 @@ tr:hover td { background: #1a1f2b; }
 }
 .sub-actions input[type=text], .sub-actions input:not([type]) { min-width: 200px; }
 .sub-actions label.check { flex-direction: row; align-items: center; gap: 6px; padding-bottom: 10px; }
+/* 本地字幕这一行同时也是拖拽落点：拖动文件经过时整行亮一下，告诉用户「松手就行」 */
+.sub-local.drag-over {
+  border: 1px dashed var(--accent); border-radius: 10px;
+  background: #1d2637;
+}
 .track-row {
   display: flex; align-items: center; gap: 10px;
   padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; margin-bottom: 6px;

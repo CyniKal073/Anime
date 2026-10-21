@@ -13,7 +13,7 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from fastapi import Depends, FastAPI, HTTPException, Query
+from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
@@ -43,11 +43,13 @@ from ..service import (
     preferences_from_dict,
     preferences_to_dict,
     resolve_work,
+    save_uploaded_subtitle,
     save_preferences,
     set_download_path,
     subtitle_merge,
     subtitle_probe,
     submit_download,
+    SUBTITLE_SUFFIXES,
     assrt_search,
 )
 
@@ -290,10 +292,16 @@ def create_app() -> FastAPI:
     @app.get("/api/browse")
     def api_browse(
         path: Optional[str] = None,
+        kind: Optional[str] = None,
         ctx: ServiceContext = Depends(get_context),
     ) -> Dict[str, Any]:
-        """列出目录下的子文件夹，供下载位置的弹窗逐层挑选。"""
-        return browse_directories(ctx, path)
+        """列出目录下的子文件夹，供下载位置的弹窗逐层挑选。
+
+        ``kind=subtitle`` 时连当前目录里的字幕文件一起列出来——选字幕文件用的
+        是同一个弹窗，只是把它从「选目录」切成了「选文件」。
+        """
+        suffixes = SUBTITLE_SUFFIXES if kind == "subtitle" else None
+        return browse_directories(ctx, path, suffixes=suffixes)
 
     @app.get("/api/mikan/releases")
     def api_mikan_releases(
@@ -413,6 +421,20 @@ def create_app() -> FastAPI:
             make_default=req.make_default,
             replace_original=req.replace_original,
         )
+
+    @app.post("/api/subtitle/upload")
+    async def api_subtitle_upload(
+        request: Request,
+        name: str = "",
+        ctx: ServiceContext = Depends(get_context),
+    ) -> Dict[str, Any]:
+        """收下浏览器拖进来的字幕文件，存进 data/subtitles/ 并返回路径。
+
+        浏览器不会把「本地文件的绝对路径」交给网页，所以拖拽只能走上传。
+        用原始字节而不是 multipart，省掉 python-multipart 依赖。
+        """
+        content = await request.body()
+        return save_uploaded_subtitle(ctx, name=name, content=content)
 
     @app.post("/api/subtitle/fetch")
     def api_subtitle_fetch(

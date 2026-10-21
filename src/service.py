@@ -141,8 +141,17 @@ def _list_drives() -> List[str]:
     return drives
 
 
-def browse_directories(ctx: ServiceContext, path: Optional[str] = None) -> Dict[str, Any]:
-    """列出某个目录下的子文件夹，供弹窗里逐层选择。"""
+def browse_directories(
+    ctx: ServiceContext,
+    path: Optional[str] = None,
+    *,
+    suffixes: Optional[Sequence[str]] = None,
+) -> Dict[str, Any]:
+    """列出某个目录下的子文件夹，供弹窗里逐层选择。
+
+    ``suffixes`` 给了就顺便把当前目录里这些后缀的文件也列出来——选字幕文件时
+    要的不是「目录」，而是一个具体文件，复用同一个弹窗最省事。
+    """
     # Windows 的「复制为路径」会带一对双引号，直接 Path() 会当成非法目录名
     path = (path or "").strip().strip('"').strip("'") or None
     try:
@@ -159,13 +168,30 @@ def browse_directories(ctx: ServiceContext, path: Optional[str] = None) -> Dict[
         }
 
     dirs: List[Dict[str, str]] = []
+    files: List[Dict[str, Any]] = []
+    wanted = tuple(item.lower() for item in suffixes) if suffixes else ()
     try:
         for item in sorted(target.iterdir(), key=lambda p: p.name.lower()):
-            if item.name.startswith(".") or not item.is_dir():
+            if item.name.startswith("."):
                 continue
-            dirs.append({"name": item.name, "path": str(item)})
-            if len(dirs) >= 200:
-                break
+            if item.is_dir():
+                if len(dirs) < 200:
+                    dirs.append({"name": item.name, "path": str(item)})
+                continue
+            if not wanted or item.suffix.lower() not in wanted or len(files) >= 300:
+                continue
+            try:
+                size = item.stat().st_size
+            except OSError:
+                size = 0
+            files.append(
+                {
+                    "name": item.name,
+                    "path": str(item),
+                    "size": size,
+                    "size_text": human_size(size),
+                }
+            )
     except OSError as exc:
         return {
             "ok": False,
@@ -175,7 +201,7 @@ def browse_directories(ctx: ServiceContext, path: Optional[str] = None) -> Dict[
         }
 
     parent = target.parent
-    return {
+    payload: Dict[str, Any] = {
         "ok": True,
         "path": str(target),
         "name": target.name or str(target),
@@ -185,6 +211,9 @@ def browse_directories(ctx: ServiceContext, path: Optional[str] = None) -> Dict[
         "env_path": ctx.settings.qbit_savepath,
         "drives": _list_drives(),
     }
+    if suffixes:
+        payload["files"] = files
+    return payload
 
 
 @dataclass
@@ -754,8 +783,12 @@ SUBTITLE_SUFFIXES = (".ass", ".ssa", ".srt", ".vtt", ".sup", ".sub")
 
 
 def _subtitle_dir(ctx: ServiceContext) -> Path:
-    """字幕的落脚处：``data/subtitles/``。下下来的外挂字幕也留在那儿备用。"""
-    path = Path(ctx.settings.cache_dir).parent / "subtitles"
+    """字幕的落脚处：``data/subtitles/``。下下来的外挂字幕也留在那儿备用。
+
+    返回绝对路径：这个路径会一路传到前端（比如拖拽上传后填进输入框），再传回来
+    当 mkvmerge 的输入。相对路径在「换个工作目录启动服务」时就断了。
+    """
+    path = (Path(ctx.settings.cache_dir).parent / "subtitles").resolve()
     path.mkdir(parents=True, exist_ok=True)
     return path
 
@@ -778,6 +811,53 @@ def _subtitle_path(
         suffix = ".ass"
     stamp = str(sub_id) if sub_id is not None else (Path(name or "file").stem[:30] or "url")
     return work_dir / f"assrt_{stamp}_{video_stem[:40]}{suffix}"
+
+
+#: 拖拽上传的字幕要有个上限——别让人顺手把一整部片子拖进字幕目录
+MAX_SUBTITLE_BYTES = 20 * 1024 * 1024
+
+
+def save_uploaded_subtitle(
+    ctx: ServiceContext,
+    *,
+    name: str,
+    content: bytes,
+) -> Dict[str, Any]:
+    """保存浏览器拖进来的字幕文件（原始字节），返回落盘后的路径。
+
+    浏览器出于安全**拿不到**拖进来那个文件的绝对路径，所以拖拽只能走上传：把
+    几十 KB 的字幕内容发过来，落到 ``data/subtitles/`` 下，之后的嵌入用这个副本。
+    字幕放在 Downloads 之类的地方时，这比在弹窗里一层层点目录快得多。
+    """
+    # 只取文件名部分：别让 "..\\..\\evil.ass" 这种名字跑出字幕目录
+    clean = Path(str(name or "").replace("\\", "/")).name
+    suffix = Path(clean).suffix.lower()
+    if suffix not in SUBTITLE_SUFFIXES:
+        return {
+            "ok": False,
+            "error": f"只认字幕文件（{' / '.join(SUBTITLE_SUFFIXES)}），"
+            f"这个文件的扩展名是 {suffix or '「没有」'}",
+        }
+    if not content:
+        return {"ok": False, "error": "文件是空的"}
+    if len(content) > MAX_SUBTITLE_BYTES:
+        return {
+            "ok": False,
+            "error": f"文件太大（{human_size(len(content))}），字幕文件不该有这么大",
+        }
+    if content[:4] == b"PK\x03\x04":
+        return {"ok": False, "error": "这是一个 zip 压缩包，不是单个字幕文件"}
+
+    safe = Path(clean).stem[:60] or "upload"
+    target = _subtitle_dir(ctx) / f"upload_{safe}{suffix}"
+    target.write_bytes(content)
+    return {
+        "ok": True,
+        "path": str(target),
+        "name": clean,
+        "size": len(content),
+        "size_text": human_size(len(content)),
+    }
 
 
 def embed_subtitle(
@@ -837,6 +917,12 @@ def embed_subtitle(
         subtitle_file = Path(subtitle_path)
         if not subtitle_file.is_file():
             return {"ok": False, "error": f"本地字幕文件不存在：{subtitle_path}"}
+        if subtitle_file.suffix.lower() not in SUBTITLE_SUFFIXES:
+            return {
+                "ok": False,
+                "error": f"这不像字幕文件（扩展名 {subtitle_file.suffix or '无'}）："
+                f"只认 {' / '.join(SUBTITLE_SUFFIXES)}",
+            }
         try:
             subtitle_size = subtitle_file.stat().st_size
         except OSError:

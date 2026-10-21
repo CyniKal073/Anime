@@ -166,7 +166,8 @@
        ====================================================================== -->
   <dialog id="pathDialog" class="path-dialog">
     <div class="pd-head">
-      <span class="pd-title">选择保存目录</span>
+      <!-- 标题由脚本改：选目录时是「选择保存目录」，选字幕文件时是「选择字幕文件」 -->
+      <span class="pd-title" id="pathTitle">选择保存目录</span>
       <button id="pathUp" class="ghost small" type="button">上一级</button>
     </div>
     <div class="pd-path" id="pathCurrent"></div>
@@ -272,6 +273,19 @@
         <input id="subOutput" placeholder="留空 = 原名.subbed.mkv">
       </label>
       <button id="subMerge" class="primary">开始合并</button>
+    </div>
+
+    <!-- 本地字幕（非批量）：硬盘上已经有的 .ass / .srt 等，直接嵌进上面的「目标视频」。
+         两条路都通：
+           · 「选择文件」→ 复用上面那个目录弹窗，切成选文件模式（服务端能拿到真实路径）；
+           · 从资源管理器把文件拖进来 → 浏览器拿不到绝对路径，所以走上传，存进
+             data/subtitles/ 再用那份副本嵌入。 -->
+    <div class="sub-actions sub-local" id="subLocalRow">
+      <label>本地字幕文件
+        <input id="subLocalFile" type="text" placeholder="拖一个 .ass/.srt 进来，或点「选择文件」">
+      </label>
+      <button id="subLocalPick" class="ghost" type="button">选择文件</button>
+      <button id="subLocalEmbed" class="primary" type="button">嵌入本地字幕</button>
     </div>
 
     <!-- 在线字幕：从射手网检索，直接嵌进上面的「目标视频」（同样不重编码） -->

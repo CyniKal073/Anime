@@ -816,6 +816,120 @@ def test_embed_with_missing_local_subtitle_says_so(client, tmp_path):
     assert ctx.assrt.calls == []  # 本地文件不见了就不该再去网上下
 
 
+# --------------------------------------------------- 本地字幕（非批量）导入
+
+
+def test_embed_local_subtitle_never_downloads(client, tmp_path):
+    """本地字幕：后端不该碰网络，直接把文件交给 mkvmerge。"""
+    video = tmp_path / "E01.mkv"
+    video.write_bytes(b"v" * 100)
+    sub = tmp_path / "01.ass"
+    sub.write_bytes(b"[Script Info]")
+
+    seen = []
+
+    class FakeMkv:
+        def mux_subtitles(self, target, subtitle_files, output, **kwargs):
+            seen.append(subtitle_files)
+            Path(output).write_bytes(b"new")
+            return {"output": str(output), "size": 3, "warnings": False}
+
+    ctx = client.app.dependency_overrides[get_context]()
+    ctx._assrt = CountingAssrt()
+    ctx._mkv = FakeMkv()
+
+    body = client.post(
+        "/api/subtitle/embed",
+        json={"target": str(video), "subtitle_path": str(sub)},
+    ).json()
+
+    assert body["ok"] is True
+    assert body["subtitle_size"] == len(b"[Script Info]")
+    assert seen == [[str(sub)]]
+    assert ctx.assrt.calls == []
+
+
+def test_embed_local_subtitle_rejects_wrong_extension(client, tmp_path):
+    video = tmp_path / "E01.mkv"
+    video.write_bytes(b"x")
+    notes = tmp_path / "notes.txt"
+    notes.write_text("x", encoding="utf-8")
+
+    body = client.post(
+        "/api/subtitle/embed",
+        json={"target": str(video), "subtitle_path": str(notes)},
+    ).json()
+
+    assert body["ok"] is False
+    assert "不像字幕文件" in body["error"]
+
+
+def test_browse_lists_subtitle_files_when_asked(client, tmp_path):
+    """选字幕文件的弹窗：同一个 /api/browse，多返回一个 files 列表。"""
+    (tmp_path / "01.ass").write_text("[Script Info]", encoding="utf-8")
+    (tmp_path / "02.srt").write_text("1", encoding="utf-8")
+    (tmp_path / "E01.mkv").write_bytes(b"x")
+    (tmp_path / "notes.txt").write_text("x", encoding="utf-8")
+    (tmp_path / "S1").mkdir()
+
+    body = client.get("/api/browse", params={"path": str(tmp_path), "kind": "subtitle"}).json()
+
+    assert body["ok"] is True
+    assert [item["name"] for item in body["files"]] == ["01.ass", "02.srt"]
+    assert body["files"][0]["path"] == str(tmp_path / "01.ass")
+    # 子文件夹照样列出来，弹窗里可以继续往里翻
+    assert [item["name"] for item in body["dirs"]] == ["S1"]
+
+
+def test_browse_without_kind_keeps_old_shape(client, tmp_path):
+    """原来的「选保存目录」弹窗行为不能变：不给 kind 就没有 files 字段。"""
+    (tmp_path / "01.ass").write_text("x", encoding="utf-8")
+    body = client.get("/api/browse", params={"path": str(tmp_path)}).json()
+    assert "files" not in body
+
+
+def test_upload_saves_local_subtitle(client):
+    body = client.post(
+        "/api/subtitle/upload", params={"name": "ep01.ass"}, content=b"[Script Info]"
+    ).json()
+
+    assert body["ok"] is True
+    saved = Path(body["path"])
+    assert saved.is_file()
+    assert saved.name == "upload_ep01.ass"
+    assert saved.read_bytes() == b"[Script Info]"
+    assert body["size"] == len(b"[Script Info]")
+
+
+def test_upload_cannot_escape_subtitle_dir(client, ctx):
+    """拖进来的文件名不可信：只取文件名部分，别让它跑到字幕目录外面去。"""
+    body = client.post(
+        "/api/subtitle/upload", params={"name": "..\\..\\evil.ass"}, content=b"x"
+    ).json()
+
+    assert body["ok"] is True
+    saved = Path(body["path"])
+    expected_dir = Path(ctx.settings.cache_dir).parent / "subtitles"
+    assert saved.parent == expected_dir
+    assert ".." not in saved.name
+
+
+def test_upload_rejects_non_subtitle(client):
+    body = client.post(
+        "/api/subtitle/upload", params={"name": "movie.mkv"}, content=b"x"
+    ).json()
+    assert body["ok"] is False
+    assert "只认字幕文件" in body["error"]
+
+
+def test_upload_rejects_zip_masquerading_as_ass(client):
+    body = client.post(
+        "/api/subtitle/upload", params={"name": "pack.ass"}, content=b"PK\x03\x04rest"
+    ).json()
+    assert body["ok"] is False
+    assert "zip" in body["error"]
+
+
 def test_batch_embed_reports_partial_failures(client, monkeypatch, tmp_path):
     paths = []
     for name in ("E01.mkv", "E02.mkv"):

@@ -636,6 +636,9 @@ window.addEventListener("DOMContentLoaded", () => {
   };
   $("subProbe").onclick = probeSubtitles;
   $("subMerge").onclick = mergeSubtitles;
+  $("subLocalPick").onclick = openSubtitlePicker;
+  $("subLocalEmbed").onclick = embedLocalSubtitle;
+  bindLocalSubtitleDrop();
   loadDownloadPath();
   $("savePathDefault").onclick = saveDownloadPathAsDefault;
   $("savePathBtn").onclick = openPathDialog;
@@ -1123,13 +1126,22 @@ async function openPathDialog(handler, startPath) {
   // 注意：直接挂在 onclick 上时第一个参数是事件对象，所以要判类型。
   pickerHandler = typeof handler === 'function' ? handler : null;
   $("pathManual").value = "";
-  await browseTo(state.savePath || state.defaultPath || "");
+  await browseTo(startPath || state.savePath || state.defaultPath || "", "dir");
   $("pathDialog").showModal();
 }
 
-async function browseTo(path) {
+/** 弹窗当前是在选目录（dir）还是选字幕文件（subtitle）。 */
+let browseMode = "dir";
+
+async function browseTo(path, mode) {
+  if (mode) browseMode = mode;
   try {
-    const r = await api("/api/browse" + (path ? "?path=" + encodeURIComponent(path) : ""));
+    const params = new URLSearchParams();
+    if (path) params.set("path", path);
+    // kind=subtitle 让服务端连当前目录里的字幕文件一起列出来
+    if (browseMode === "subtitle") params.set("kind", "subtitle");
+    const qs = params.toString();
+    const r = await api("/api/browse" + (qs ? "?" + qs : ""));
     if (!r.ok) {
       toast("无法打开：" + (r.error || ""), "bad");
       return;
@@ -1142,6 +1154,14 @@ async function browseTo(path) {
 }
 
 function renderBrowse(r) {
+  const pickingFile = browseMode === "subtitle";
+  $("pathTitle").textContent = pickingFile ? "选择字幕文件" : "选择保存目录";
+  $("pathManual").placeholder = pickingFile
+    ? "也可以直接粘贴字幕文件的完整路径"
+    : "也可以直接粘贴完整路径";
+  // 「选当前目录」在选文件时没有意义——要的是文件，不是一个文件夹
+  $("pathUseCurrent").classList.toggle("hidden", pickingFile);
+
   $("pathCurrent").textContent = r.path;
   const up = $("pathUp");
   up.disabled = !r.parent;
@@ -1160,10 +1180,13 @@ function renderBrowse(r) {
 
   const list = $("pathList");
   list.innerHTML = "";
-  if (!(r.dirs || []).length) {
+  const files = r.files || [];
+  if (!(r.dirs || []).length && !files.length) {
     const empty = document.createElement("div");
     empty.className = "empty";
-    empty.textContent = "（没有子文件夹，可直接点「选当前目录」）";
+    empty.textContent = pickingFile
+      ? "（这里没有字幕文件，可以进子文件夹，或直接粘路径）"
+      : "（没有子文件夹，可直接点「选当前目录」）";
     list.appendChild(empty);
   }
   (r.dirs || []).forEach((dir) => {
@@ -1173,8 +1196,9 @@ function renderBrowse(r) {
     name.type = "button";
     name.className = "pd-name";
     name.textContent = dir.name;
-    name.title = "就选这个：" + dir.path;
-    name.onclick = () => chooseSavePath(dir.path);
+    // 选文件时点文件夹名就是「进去」，不是「选这个文件夹」——否则会选到一个目录
+    name.title = pickingFile ? "进入：" + dir.path : "就选这个：" + dir.path;
+    name.onclick = () => (pickingFile ? browseTo(dir.path) : chooseSavePath(dir.path));
     const enter = document.createElement("button");
     enter.type = "button";
     enter.className = "ghost small";
@@ -1186,6 +1210,19 @@ function renderBrowse(r) {
     };
     row.appendChild(name);
     row.appendChild(enter);
+    list.appendChild(row);
+  });
+  // 字幕文件：点名字就选中（选完弹窗自动关）
+  files.forEach((file) => {
+    const row = document.createElement("div");
+    row.className = "pd-row";
+    const name = document.createElement("button");
+    name.type = "button";
+    name.className = "pd-name";
+    name.textContent = `${file.name}  (${file.size_text})`;
+    name.title = "选这个字幕：" + file.path;
+    name.onclick = () => chooseSavePath(file.path);
+    row.appendChild(name);
     list.appendChild(row);
   });
 }
@@ -1348,6 +1385,160 @@ async function mergeSubtitles() {
   } finally {
     btn.disabled = false;
     btn.textContent = "开始合并";
+  }
+}
+
+/* ------------------------------------------------- 本地字幕（非批量） */
+
+/**
+ * 把硬盘上已经有的一个字幕文件嵌进「目标视频」。
+ *
+ * 字幕来源有两条路：
+ *   · 「选择文件」——复用上面那个目录弹窗（切成选文件模式）。服务端能看到
+ *     真实路径，所以直接把路径交给后端，不复制文件。
+ *   · 从资源管理器拖进来——浏览器出于安全拿不到绝对路径，只能把内容上传，
+ *     落到 data/subtitles/ 下再用那份副本。
+ */
+const SUBTITLE_EXT_RE = /\.(ass|ssa|srt|vtt|sup|sub)$/i;
+
+/** 记住上次挑字幕的目录，下次直接从那儿开始翻。 */
+function rememberSubtitleDir(filePath) {
+  const parts = String(filePath || "").split(/[\\/]/);
+  parts.pop();
+  const dir = parts.join("\\");
+  if (dir) localStorage.setItem("subtitleDir", dir);
+}
+
+async function openSubtitlePicker() {
+  const current = $("subLocalFile").value.trim();
+  pickerHandler = (path) => {
+    if (!path) return;
+    $("subLocalFile").value = path;
+    rememberSubtitleDir(path);
+    toast("已选字幕：" + path.split(/[\\/]/).pop(), "ok");
+  };
+  $("pathManual").value = "";
+  // 起始目录：当前文件所在目录 → 上次挑字幕的目录 → 目标视频所在目录 → 下载目录
+  let start = "";
+  if (current) {
+    const parts = current.split(/[\\/]/);
+    parts.pop();
+    start = parts.join("\\");
+  }
+  if (!start) start = localStorage.getItem("subtitleDir") || "";
+  const target = $("subTarget").value.trim();
+  if (!start && target) {
+    const parts = target.split(/[\\/]/);
+    parts.pop();
+    start = parts.join("\\");
+  }
+  if (!start) start = state.savePath || state.defaultPath || "";
+  await browseTo(start, "subtitle");
+  $("pathDialog").showModal();
+}
+
+/** 拖进来的字幕：先传到服务端落盘，再把落盘路径填进输入框。 */
+async function uploadLocalSubtitle(file) {
+  const name = file && file.name ? file.name : "";
+  if (!SUBTITLE_EXT_RE.test(name)) {
+    toast("这不是字幕文件（只认 .ass / .ssa / .srt / .vtt / .sup / .sub）", "bad");
+    return;
+  }
+  const input = $("subLocalFile");
+  input.value = "上传中…";
+  try {
+    const r = await api("/api/subtitle/upload?name=" + encodeURIComponent(name), {
+      method: "POST",
+      body: file,
+    });
+    if (!r.ok) {
+      input.value = "";
+      toast("上传失败：" + (r.error || ""), "bad");
+      return;
+    }
+    input.value = r.path;
+    rememberSubtitleDir(r.path);
+    toast(`已接收 ${r.name}（${r.size_text}），路径：${r.path}`, "ok");
+  } catch (err) {
+    input.value = "";
+    toast("上传失败：" + err.message, "bad");
+  }
+}
+
+/** 把这一行变成拖拽落点。 */
+function bindLocalSubtitleDrop() {
+  const row = $("subLocalRow");
+  ["dragenter", "dragover"].forEach((type) => {
+    row.addEventListener(type, (event) => {
+      if (!event.dataTransfer) return;
+      // 只有拖「文件」时才接管（拖动文本/链接不要高亮）
+      if (!Array.from(event.dataTransfer.types || []).includes("Files")) return;
+      event.preventDefault();
+      row.classList.add("drag-over");
+    });
+  });
+  row.addEventListener("dragleave", (event) => {
+    // 从子元素之间移动也会触发 dragleave，只在真正离开整行时取消高亮
+    if (row.contains(event.relatedTarget)) return;
+    row.classList.remove("drag-over");
+  });
+  row.addEventListener("drop", (event) => {
+    const file = event.dataTransfer && event.dataTransfer.files && event.dataTransfer.files[0];
+    if (!file) return;
+    event.preventDefault();
+    row.classList.remove("drag-over");
+    uploadLocalSubtitle(file);
+  });
+  // 拖到别处松手时，别让浏览器把那个文件当成新页面打开（会把当前页面顶掉）
+  window.addEventListener("dragover", (event) => event.preventDefault());
+  window.addEventListener("drop", (event) => event.preventDefault());
+}
+
+async function embedLocalSubtitle() {
+  const target = $("subTarget").value.trim();
+  const subtitle = $("subLocalFile").value.trim();
+  if (!target) {
+    toast("请先在上面填「目标视频」的路径");
+    return;
+  }
+  if (!subtitle) {
+    toast("请先选一个字幕文件（或直接拖进来）");
+    return;
+  }
+  const btn = $("subLocalEmbed");
+  btn.disabled = true;
+  btn.textContent = "嵌入中…";
+  try {
+    const r = await api("/api/subtitle/embed", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        target,
+        // 本地文件：后端不会再下载，直接拿它当 mkvmerge 的输入
+        subtitle_path: subtitle,
+        language: $("subLang").value,
+        track_name: $("subTrackName").value.trim() || null,
+        output: $("subOutput").value.trim() || null,
+        make_default: $("subDefault").checked,
+        replace_original: $("subReplace").checked,
+      }),
+    });
+    if (!r.ok) {
+      toast("嵌入失败：" + (r.error || ""), "bad");
+      return;
+    }
+    toast(
+      `已生成：${r.output}${r.replaced ? "（已替换原文件）" : ""}\n` +
+        `字幕 ${r.subtitle_size} 字节，成片 ${r.output_size_text}`,
+      "ok"
+    );
+    if (r.replace_error) toast("替换原文件没成功：" + r.replace_error, "bad");
+    loadLibrary();
+  } catch (err) {
+    toast("嵌入失败：" + err.message, "bad");
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "嵌入本地字幕";
   }
 }
 
