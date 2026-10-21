@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from urllib.parse import unquote
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
@@ -150,8 +151,9 @@ def browse_directories(
 ) -> Dict[str, Any]:
     """列出某个目录下的子文件夹，供弹窗里逐层选择。
 
-    ``suffixes`` 给了就顺便把当前目录里这些后缀的文件也列出来——选字幕文件时
-    要的不是「目录」，而是一个具体文件，复用同一个弹窗最省事。
+    ``suffixes`` 给了就顺便把当前目录里的文件也列出来——选文件时要的不是
+    「目录」，而是一个具体文件，复用同一个弹窗最省事。传 ``()`` 表示不过滤
+    （选视频时不限制扩展名，交给 mkvmerge 判断）。
     """
     # Windows 的「复制为路径」会带一对双引号，直接 Path() 会当成非法目录名
     path = (path or "").strip().strip('"').strip("'") or None
@@ -170,6 +172,7 @@ def browse_directories(
 
     dirs: List[Dict[str, str]] = []
     files: List[Dict[str, Any]] = []
+    listing_files = suffixes is not None
     wanted = tuple(item.lower() for item in suffixes) if suffixes else ()
     try:
         for item in sorted(target.iterdir(), key=lambda p: p.name.lower()):
@@ -179,7 +182,10 @@ def browse_directories(
                 if len(dirs) < 200:
                     dirs.append({"name": item.name, "path": str(item)})
                 continue
-            if not wanted or item.suffix.lower() not in wanted or len(files) >= 300:
+            # 先收集（上限放宽一些），排好序再截断——否则视频可能在被排序前就被砍掉
+            if not listing_files or len(files) >= 1000:
+                continue
+            if wanted and item.suffix.lower() not in wanted:
                 continue
             try:
                 size = item.stat().st_size
@@ -202,6 +208,15 @@ def browse_directories(
         }
 
     parent = target.parent
+    if listing_files:
+        # 选视频的弹窗不过滤扩展名，但把认识的视频排前面，其它文件垫底
+        files.sort(
+            key=lambda item: (
+                Path(item["name"]).suffix.lower() not in VIDEO_SUFFIXES,
+                item["name"].lower(),
+            )
+        )
+        del files[300:]
     payload: Dict[str, Any] = {
         "ok": True,
         "path": str(target),
@@ -212,7 +227,7 @@ def browse_directories(
         "env_path": ctx.settings.qbit_savepath,
         "drives": _list_drives(),
     }
-    if suffixes:
+    if listing_files:
         payload["files"] = files
     return payload
 
@@ -1146,8 +1161,100 @@ def fetch_subtitles_batch(ctx: ServiceContext, items: Sequence[Dict[str, Any]]) 
 #: 列目录时认为「可能是视频」的扩展名
 VIDEO_SUFFIXES = (".mkv", ".mp4", ".m4v", ".avi", ".ts", ".m2ts", ".mov", ".wmv", ".flv")
 
-#: 拖拽「找回路径」时最多扫多少个文件；再大就提示改用弹窗挑
-RESOLVE_SCAN_LIMIT = 50000
+#: 拖拽「找回路径」的总时间预算（秒）。先在已知目录里找，找不到再去盘符里扫。
+RESOLVE_TIME_BUDGET = 6.0
+
+#: 扫盘符时最多进几层子目录（E:\Media\Anime\2024\Show\file.mkv 是 4 层）
+RESOLVE_DRIVE_DEPTH = 4
+
+#: 扫盘符时跳过的系统目录，别把时间浪费在 Windows / Program Files 上
+RESOLVE_SKIP_DIRS = {
+    "windows",
+    "program files",
+    "program files (x86)",
+    "programdata",
+    "appdata",
+    "$recycle.bin",
+    "system volume information",
+    "recovery",
+    "perflogs",
+    "msocache",
+    "config.msi",
+    "documents and settings",
+}
+
+
+def _find_named_file(
+    root: Path,
+    filename: str,
+    size: Optional[int],
+    deadline: float,
+    *,
+    max_depth: Optional[int] = None,
+) -> Tuple[List[Dict[str, Any]], bool]:
+    """在 root 下找同名文件，返回 (候选列表, 是否超时)。
+
+    用 ``os.scandir`` 而不是 ``Path.rglob``：前者不会把文件名当通配符，
+    而番剧文件名里全是 ``[`` ``]`` 这种字符。
+    """
+    matches: List[Dict[str, Any]] = []
+    target = filename.lower()
+    stack: List[Tuple[Path, int]] = [(root, 0)]
+    while stack:
+        if time.time() > deadline:
+            return matches, True
+        current, depth = stack.pop()
+        try:
+            with os.scandir(current) as entries:
+                for entry in entries:
+                    try:
+                        if entry.is_file(follow_symlinks=False):
+                            if entry.name.lower() != target:
+                                continue
+                            stat = entry.stat()
+                            if size is not None and size >= 0 and stat.st_size != size:
+                                continue
+                            matches.append(
+                                {
+                                    "path": entry.path,
+                                    "size": stat.st_size,
+                                    "size_text": human_size(stat.st_size),
+                                }
+                            )
+                            if len(matches) >= 5:
+                                return matches, False
+                        elif entry.is_dir(follow_symlinks=False):
+                            if max_depth is not None and depth >= max_depth:
+                                continue
+                            if entry.name.startswith("."):
+                                continue
+                            if entry.name.lower() in RESOLVE_SKIP_DIRS:
+                                continue
+                            stack.append((Path(entry.path), depth + 1))
+                    except OSError:
+                        continue
+        except OSError:
+            continue
+    return matches, False
+
+
+def _resolve_result(matches: List[Dict[str, Any]], cleaned: str, *, timed_out: bool) -> Dict[str, Any]:
+    if len(matches) == 1:
+        return {"ok": True, "path": matches[0]["path"], "candidates": matches}
+    if len(matches) > 1:
+        return {
+            "ok": False,
+            "error": f"找到 {len(matches)} 个同名同大小的文件，没法替你决定用哪个，请点「选择」自己挑",
+            "candidates": matches,
+        }
+    return {
+        "ok": False,
+        "error": (
+            f"{'没找到' if not timed_out else '搜索超时，没找到'} {cleaned}。"
+            "网页拿不到拖进来文件的完整路径，视频又不能上传，只能按「文件名 + 大小」反查。"
+            "请点「选择」逐层挑（任何盘都能翻）——那条路不靠猜，直接给真实路径。"
+        ),
+    }
 
 
 def resolve_local_video(
@@ -1156,75 +1263,78 @@ def resolve_local_video(
     name: str,
     size: Optional[int] = None,
     hint_dir: Optional[str] = None,
+    extra_dirs: Sequence[str] = (),
 ) -> Dict[str, Any]:
     """把浏览器拖进来那个「只有文件名和大小」的文件，找回本机真实路径。
 
     浏览器出于安全**不会**把本地文件的绝对路径交给网页，视频又不可能像字幕那样
-    上传（一部片子几十 GB），所以拖拽只能靠「文件名 + 字节大小」在下载目录里反查。
-    大小也对得上才算命中，避免把同一部片的不同压制版本认错。
+    上传（一部片子几十 GB），所以拖拽只能靠「文件名 + 字节大小」反查。
+    大小对得上才算命中，避免把同一部片的不同压制版本认错。
 
-    先扫 ``hint_dir``（调用方给，通常是另一个输入框所在的文件夹），没命中再扫
-    下载目录。找到唯一匹配才返回；有多个同名同大小的就退回去让用户手动挑。
+    搜索范围（前几个是快路径，最后才扫盘符）：
+
+    1. 另一栏所在的文件夹 / 前端报上来的最近用过的目录；
+    2. 下载目录（界面设置的优先，其次是 ``.env`` 里的默认值）；
+    3. 上面这些目录所在的盘符，限 4 层深、跳过系统目录。
+
+    不限制扩展名——是不是视频交给 mkvmerge 判断，别在选路径这一步替用户做主。
     """
     cleaned = (name or "").strip().strip('"').strip("'")
     if not cleaned:
         return {"ok": False, "error": "没有文件名"}
     cleaned = Path(cleaned.replace("\\", "/")).name
-    if Path(cleaned).suffix.lower() not in VIDEO_SUFFIXES:
-        return {"ok": False, "error": f"这不是视频文件：{cleaned}"}
 
     roots: List[Path] = []
-    for candidate in (hint_dir, effective_save_path(ctx)):
+    candidates = [hint_dir, *extra_dirs, effective_save_path(ctx), ctx.settings.qbit_savepath]
+    for candidate in candidates:
         raw = (candidate or "").strip().strip('"').strip("'")
         if not raw:
             continue
-        root = Path(raw)
+        try:
+            root = Path(raw)
+        except (TypeError, ValueError):
+            continue
         if root.is_dir() and all(str(root) != str(existing) for existing in roots):
             roots.append(root)
-    if not roots:
-        return {"ok": False, "error": "下载目录不存在，没法按文件名找回路径"}
 
-    scanned = 0
+    deadline = time.time() + RESOLVE_TIME_BUDGET
+
+    # 一、已知目录：整棵子树都翻
+    timed_out = False
     for root in roots:
-        matches: List[Dict[str, Any]] = []
-        try:
-            walker = os.walk(root)
-            for dirpath, dirnames, filenames in walker:
-                # 隐藏目录（.git、.cache 之类）不用翻
-                dirnames[:] = [item for item in dirnames if not item.startswith(".")]
-                for filename in filenames:
-                    scanned += 1
-                    if len(matches) >= 5 or scanned >= RESOLVE_SCAN_LIMIT:
-                        break
-                    if filename.lower() != cleaned.lower():
-                        continue
-                    path = Path(dirpath) / filename
-                    try:
-                        found = path.stat().st_size
-                    except OSError:
-                        continue
-                    if size is not None and size >= 0 and found != size:
-                        continue
-                    matches.append({"path": str(path), "size": found, "size_text": human_size(found)})
-                if len(matches) >= 5 or scanned >= RESOLVE_SCAN_LIMIT:
-                    break
-        except OSError as exc:
-            return {"ok": False, "error": f"扫描目录失败：{exc}"}
+        matches, timed_out = _find_named_file(root, cleaned, size, deadline)
+        if matches:
+            return _resolve_result(matches, cleaned, timed_out=timed_out)
 
-        if len(matches) == 1:
-            return {"ok": True, "path": matches[0]["path"], "candidates": matches}
-        if len(matches) > 1:
-            return {
-                "ok": False,
-                "error": f"找到 {len(matches)} 个同名同大小的文件，没法替你决定用哪个，请点「选择」自己挑",
-                "candidates": matches,
-            }
+    # 二、盘符：限深度地扫一遍（媒体目录通常不会太深）。
+    #     先扫已知目录所在的盘，再把其余盘也扫一遍——拖拽不该只认下载目录。
+    drives: List[Path] = []
+    for root in roots:
+        anchor = root.anchor
+        if anchor:
+            drive = Path(anchor)
+            if drive.is_dir() and all(str(drive) != str(existing) for existing in drives):
+                drives.append(drive)
+    for letter in _list_drives():
+        drive = Path(letter)
+        if drive.is_dir() and all(str(drive) != str(existing) for existing in drives):
+            drives.append(drive)
 
-    return {
-        "ok": False,
-        "error": f"没在下载目录里找到 {cleaned}。浏览器读不到拖进来文件的完整路径，"
-        "请点「选择」逐层挑（别的盘也能挑），或者把文件放进下载目录再拖。",
-    }
+    for index, drive in enumerate(drives):
+        # 剩下的时间平分给还没扫的盘，免得第一个盘把预算吃光、后面的盘轮不到
+        left = max(0.5, deadline - time.time())
+        slot = left / max(1, len(drives) - index)
+        matches, timed_out = _find_named_file(
+            drive,
+            cleaned,
+            size,
+            min(deadline, time.time() + slot),
+            max_depth=RESOLVE_DRIVE_DEPTH,
+        )
+        if matches:
+            return _resolve_result(matches, cleaned, timed_out=timed_out)
+
+    return _resolve_result([], cleaned, timed_out=timed_out)
 
 
 def list_library(

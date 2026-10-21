@@ -305,7 +305,9 @@ def create_app() -> FastAPI:
         if kind == "subtitle":
             suffixes: Optional[Sequence[str]] = SUBTITLE_SUFFIXES
         elif kind == "video":
-            suffixes = VIDEO_SUFFIXES
+            # 空元组 = 列全部文件。选视频不该被扩展名卡住（.webm/.rmvb 之类
+            # 也能被 mkvmerge 读），认识的视频只是在列表里排在前面。
+            suffixes = ()
         else:
             suffixes = None
         return browse_directories(ctx, path, suffixes=suffixes)
@@ -493,13 +495,14 @@ def create_app() -> FastAPI:
         name: str,
         size: Optional[int] = None,
         dir: Optional[str] = None,
+        dirs: List[str] = Query(default=[]),
         ctx: ServiceContext = Depends(get_context),
     ) -> Dict[str, Any]:
         """拖进来一个视频文件后，按「文件名 + 大小」反查它的本机路径。
 
         网页拿不到拖拽文件的绝对路径，视频又不能上传，所以只能这样找回来。
         """
-        return resolve_local_video(ctx, name=name, size=size, hint_dir=dir)
+        return resolve_local_video(ctx, name=name, size=size, hint_dir=dir, extra_dirs=dirs)
 
     @app.post("/api/subtitle/embed-batch")
     def api_subtitle_embed_batch(

@@ -1404,7 +1404,6 @@ async function mergeSubtitles() {
  *     落到 data/subtitles/ 下再用那份副本。
  */
 const SUBTITLE_EXT_RE = /\.(ass|ssa|srt|vtt|sup|sub)$/i;
-const VIDEO_EXT_RE = /\.(mkv|mp4|m4v|avi|ts|m2ts|mov|wmv|flv)$/i;
 
 /** 文件路径 → 所在目录；没填路径就返回空串。 */
 function dirOf(filePath) {
@@ -1491,8 +1490,11 @@ async function uploadLocalSubtitle(file) {
  * 上传（一部片子几十 GB），所以拿「文件名 + 字节数」回服务端在下载目录里反查。
  */
 async function resolveDroppedVideo(file, inputId) {
-  if (!VIDEO_EXT_RE.test((file && file.name) || "")) {
-    toast("这不是视频文件（只认 .mkv / .mp4 / .avi / .ts 等）", "bad");
+  const name = (file && file.name) || "";
+  // 不卡扩展名：.webm / .rmvb / .m2ts 之类 mkvmerge 一样能读，
+  // 只在明显拖错位置时提醒一下（字幕拖到视频框里去了）
+  if (SUBTITLE_EXT_RE.test(name)) {
+    toast("这是字幕文件，请拖到下面「本地字幕文件」那一行", "bad");
     return;
   }
   const input = $(inputId);
@@ -1500,9 +1502,14 @@ async function resolveDroppedVideo(file, inputId) {
   input.value = "查找中…";
   try {
     const other = inputId === "subTarget" ? $("subSource").value : $("subTarget").value;
-    const params = new URLSearchParams({ name: file.name, size: String(file.size) });
+    const params = new URLSearchParams({ name, size: String(file.size) });
     // 另一栏已经填了的话，先在那个文件夹里找
     if (dirOf(other)) params.set("dir", dirOf(other));
+    // 以前挑过的目录也报给服务端：拖拽不再只认下载目录
+    const recent = new Set(
+      [localStorage.getItem("videoDir"), localStorage.getItem("subtitleDir")].filter(Boolean)
+    );
+    recent.forEach((dir) => params.append("dirs", dir));
     const r = await api("/api/videos/resolve?" + params.toString());
     if (!r.ok) {
       input.value = previous;

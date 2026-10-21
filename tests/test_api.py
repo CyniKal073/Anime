@@ -889,12 +889,12 @@ def test_browse_without_kind_keeps_old_shape(client, tmp_path):
     assert "files" not in body
 
 
-def test_browse_lists_video_files_when_asked(client, tmp_path):
-    """目标视频 / 来源视频的「选择」：同一个弹窗，只列视频。"""
+def test_browse_video_mode_lists_all_files_videos_first(client, tmp_path):
+    """选视频的弹窗不卡扩展名（.webm/.rmvb 也能选），只是把视频排在前面。"""
     (tmp_path / "E01.mkv").write_bytes(b"x")
     (tmp_path / "01.ass").write_text("x", encoding="utf-8")
     body = client.get("/api/browse", params={"path": str(tmp_path), "kind": "video"}).json()
-    assert [item["name"] for item in body["files"]] == ["E01.mkv"]
+    assert [item["name"] for item in body["files"]] == ["E01.mkv", "01.ass"]
 
 
 def _use_savepath(ctx, path):
@@ -918,17 +918,19 @@ def test_resolve_video_finds_unique_match_by_name_and_size(client, ctx, tmp_path
     assert body["path"] == str(video)
 
 
-def test_resolve_video_rejects_same_name_different_size(client, ctx, tmp_path):
+def test_resolve_video_rejects_same_name_different_size(client, ctx, tmp_path, monkeypatch):
     """同名但大小对不上 = 不是我们要的那个文件，不能凑合。"""
     _use_savepath(ctx, tmp_path)
     (tmp_path / "E01.mkv").write_bytes(b"12345")
+    # 别真去扫整块盘：这一步只关心「找不到」的结论
+    monkeypatch.setattr("src.service._list_drives", lambda: [])
 
     body = client.get(
         "/api/videos/resolve", params={"name": "E01.mkv", "size": 999}
     ).json()
 
     assert body["ok"] is False
-    assert "没在下载目录里找到" in body["error"]
+    assert "没找到" in body["error"]
 
 
 def test_resolve_video_refuses_ambiguous_matches(client, ctx, tmp_path):
@@ -947,12 +949,32 @@ def test_resolve_video_refuses_ambiguous_matches(client, ctx, tmp_path):
     assert len(body["candidates"]) == 2
 
 
-def test_resolve_video_rejects_non_video(client, ctx, tmp_path):
+def test_resolve_video_accepts_unusual_extensions(client, ctx, tmp_path):
+    """不卡扩展名：是不是视频交给 mkvmerge 判断，选路径这一步不替用户做主。"""
     _use_savepath(ctx, tmp_path)
-    (tmp_path / "notes.txt").write_text("x", encoding="utf-8")
-    body = client.get("/api/videos/resolve", params={"name": "notes.txt"}).json()
-    assert body["ok"] is False
-    assert "不是视频文件" in body["error"]
+    (tmp_path / "E01.webm").write_bytes(b"12345")
+    body = client.get("/api/videos/resolve", params={"name": "E01.webm", "size": 5}).json()
+    assert body["ok"] is True
+    assert body["path"].endswith("E01.webm")
+
+
+def test_resolve_video_searches_extra_dirs(client, ctx, tmp_path):
+    """前端报上来的「最近用过的目录」也要找——拖拽不再只认下载目录。"""
+    downloads = tmp_path / "downloads"
+    downloads.mkdir()
+    _use_savepath(ctx, downloads)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    video = elsewhere / "E01.mkv"
+    video.write_bytes(b"123")
+
+    body = client.get(
+        "/api/videos/resolve",
+        params=[("name", "E01.mkv"), ("size", "3"), ("dirs", str(elsewhere))],
+    ).json()
+
+    assert body["ok"] is True
+    assert body["path"] == str(video)
 
 
 def test_upload_saves_local_subtitle(client):

@@ -257,6 +257,7 @@
     <!-- 字幕轨列表（带复选框）由脚本渲染 -->
     <div id="subTracks"></div>
 
+    <!-- 共用选项：上面三种嵌入方式（搬字幕轨 / 本地字幕 / 射手网）都用这一组 -->
     <div class="sub-actions">
       <label>语言
         <select id="subLang">
@@ -273,21 +274,28 @@
       </label>
       <!-- 勾上后用新文件顶替原视频：省一半空间，但原文件就没了（不可逆）。
            嵌字幕只是往容器里加一条轨道，新文件理应不比原文件小；
-           明显变小的话后端会拒绝替换，只会留下新文件。 -->
+           明显变小的话后端会拒绝替换，只会留下新文件。
+           这一项对下面三种嵌入方式都生效，不只是「开始合并」。 -->
       <label class="check">
-        <input id="subReplace" type="checkbox"> 嵌入后替换原文件（省空间，不可逆）
+        <input id="subReplace" type="checkbox"> 嵌入后替换原文件（三种方式共用，不可逆）
       </label>
       <label>输出文件名
         <input id="subOutput" placeholder="留空 = 原名.subbed.mkv">
       </label>
+    </div>
+
+    <!-- 方式一：把「来源视频」里的字幕轨搬进「目标视频」 -->
+    <div class="sub-actions">
       <button id="subMerge" class="primary">开始合并</button>
+      <span class="muted">把上面读取到的字幕轨搬进「目标视频」（用上面的语言 / 轨道名 / 替换选项）</span>
     </div>
 
     <!-- 本地字幕（非批量）：硬盘上已经有的 .ass / .srt 等，直接嵌进上面的「目标视频」。
          两条路都通：
            · 「选择文件」→ 复用上面那个目录弹窗，切成选文件模式（服务端能拿到真实路径）；
            · 从资源管理器把文件拖进来 → 浏览器拿不到绝对路径，所以走上传，存进
-             data/subtitles/ 再用那份副本嵌入。 -->
+             data/subtitles/ 再用那份副本嵌入。
+         语言 / 轨道名 / 设为默认 / 替换原文件 / 输出文件名 都沿用上面那一行。 -->
     <div class="sub-actions sub-local" id="subLocalRow">
       <label>本地字幕文件
         <input id="subLocalFile" type="text" placeholder="拖一个 .ass/.srt 进来，或点「选择文件」">
