@@ -7,6 +7,7 @@ JSON 的普通字典，避免把业务逻辑写进路由或 CLI 里。
 from __future__ import annotations
 
 import json
+import os
 from urllib.parse import unquote
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
@@ -1144,6 +1145,86 @@ def fetch_subtitles_batch(ctx: ServiceContext, items: Sequence[Dict[str, Any]]) 
 
 #: 列目录时认为「可能是视频」的扩展名
 VIDEO_SUFFIXES = (".mkv", ".mp4", ".m4v", ".avi", ".ts", ".m2ts", ".mov", ".wmv", ".flv")
+
+#: 拖拽「找回路径」时最多扫多少个文件；再大就提示改用弹窗挑
+RESOLVE_SCAN_LIMIT = 50000
+
+
+def resolve_local_video(
+    ctx: ServiceContext,
+    *,
+    name: str,
+    size: Optional[int] = None,
+    hint_dir: Optional[str] = None,
+) -> Dict[str, Any]:
+    """把浏览器拖进来那个「只有文件名和大小」的文件，找回本机真实路径。
+
+    浏览器出于安全**不会**把本地文件的绝对路径交给网页，视频又不可能像字幕那样
+    上传（一部片子几十 GB），所以拖拽只能靠「文件名 + 字节大小」在下载目录里反查。
+    大小也对得上才算命中，避免把同一部片的不同压制版本认错。
+
+    先扫 ``hint_dir``（调用方给，通常是另一个输入框所在的文件夹），没命中再扫
+    下载目录。找到唯一匹配才返回；有多个同名同大小的就退回去让用户手动挑。
+    """
+    cleaned = (name or "").strip().strip('"').strip("'")
+    if not cleaned:
+        return {"ok": False, "error": "没有文件名"}
+    cleaned = Path(cleaned.replace("\\", "/")).name
+    if Path(cleaned).suffix.lower() not in VIDEO_SUFFIXES:
+        return {"ok": False, "error": f"这不是视频文件：{cleaned}"}
+
+    roots: List[Path] = []
+    for candidate in (hint_dir, effective_save_path(ctx)):
+        raw = (candidate or "").strip().strip('"').strip("'")
+        if not raw:
+            continue
+        root = Path(raw)
+        if root.is_dir() and all(str(root) != str(existing) for existing in roots):
+            roots.append(root)
+    if not roots:
+        return {"ok": False, "error": "下载目录不存在，没法按文件名找回路径"}
+
+    scanned = 0
+    for root in roots:
+        matches: List[Dict[str, Any]] = []
+        try:
+            walker = os.walk(root)
+            for dirpath, dirnames, filenames in walker:
+                # 隐藏目录（.git、.cache 之类）不用翻
+                dirnames[:] = [item for item in dirnames if not item.startswith(".")]
+                for filename in filenames:
+                    scanned += 1
+                    if len(matches) >= 5 or scanned >= RESOLVE_SCAN_LIMIT:
+                        break
+                    if filename.lower() != cleaned.lower():
+                        continue
+                    path = Path(dirpath) / filename
+                    try:
+                        found = path.stat().st_size
+                    except OSError:
+                        continue
+                    if size is not None and size >= 0 and found != size:
+                        continue
+                    matches.append({"path": str(path), "size": found, "size_text": human_size(found)})
+                if len(matches) >= 5 or scanned >= RESOLVE_SCAN_LIMIT:
+                    break
+        except OSError as exc:
+            return {"ok": False, "error": f"扫描目录失败：{exc}"}
+
+        if len(matches) == 1:
+            return {"ok": True, "path": matches[0]["path"], "candidates": matches}
+        if len(matches) > 1:
+            return {
+                "ok": False,
+                "error": f"找到 {len(matches)} 个同名同大小的文件，没法替你决定用哪个，请点「选择」自己挑",
+                "candidates": matches,
+            }
+
+    return {
+        "ok": False,
+        "error": f"没在下载目录里找到 {cleaned}。浏览器读不到拖进来文件的完整路径，"
+        "请点「选择」逐层挑（别的盘也能挑），或者把文件放进下载目录再拖。",
+    }
 
 
 def list_library(

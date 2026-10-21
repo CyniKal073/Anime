@@ -11,7 +11,7 @@ from __future__ import annotations
 import argparse
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse
@@ -42,6 +42,7 @@ from ..service import (
     pair_by_order,
     preferences_from_dict,
     preferences_to_dict,
+    resolve_local_video,
     resolve_work,
     save_uploaded_subtitle,
     save_preferences,
@@ -50,6 +51,7 @@ from ..service import (
     subtitle_probe,
     submit_download,
     SUBTITLE_SUFFIXES,
+    VIDEO_SUFFIXES,
     assrt_search,
 )
 
@@ -297,10 +299,15 @@ def create_app() -> FastAPI:
     ) -> Dict[str, Any]:
         """列出目录下的子文件夹，供下载位置的弹窗逐层挑选。
 
-        ``kind=subtitle`` 时连当前目录里的字幕文件一起列出来——选字幕文件用的
-        是同一个弹窗，只是把它从「选目录」切成了「选文件」。
+        ``kind=subtitle`` / ``kind=video`` 时连当前目录里对应类型的文件一起列出来
+        ——选字幕、选视频用的都是同一个弹窗，只是把它从「选目录」切成了「选文件」。
         """
-        suffixes = SUBTITLE_SUFFIXES if kind == "subtitle" else None
+        if kind == "subtitle":
+            suffixes: Optional[Sequence[str]] = SUBTITLE_SUFFIXES
+        elif kind == "video":
+            suffixes = VIDEO_SUFFIXES
+        else:
+            suffixes = None
         return browse_directories(ctx, path, suffixes=suffixes)
 
     @app.get("/api/mikan/releases")
@@ -480,6 +487,19 @@ def create_app() -> FastAPI:
         result = list_library(ctx, path, suffixes=(".mkv",), recursive=False)
         result["dir"] = result.pop("root", None)
         return result
+
+    @app.get("/api/videos/resolve")
+    def api_resolve_video(
+        name: str,
+        size: Optional[int] = None,
+        dir: Optional[str] = None,
+        ctx: ServiceContext = Depends(get_context),
+    ) -> Dict[str, Any]:
+        """拖进来一个视频文件后，按「文件名 + 大小」反查它的本机路径。
+
+        网页拿不到拖拽文件的绝对路径，视频又不能上传，所以只能这样找回来。
+        """
+        return resolve_local_video(ctx, name=name, size=size, hint_dir=dir)
 
     @app.post("/api/subtitle/embed-batch")
     def api_subtitle_embed_batch(

@@ -638,7 +638,9 @@ window.addEventListener("DOMContentLoaded", () => {
   $("subMerge").onclick = mergeSubtitles;
   $("subLocalPick").onclick = openSubtitlePicker;
   $("subLocalEmbed").onclick = embedLocalSubtitle;
-  bindLocalSubtitleDrop();
+  $("subTargetPick").onclick = () => openVideoPicker("subTarget");
+  $("subSourcePick").onclick = () => openVideoPicker("subSource");
+  bindDropTargets();
   loadDownloadPath();
   $("savePathDefault").onclick = saveDownloadPathAsDefault;
   $("savePathBtn").onclick = openPathDialog;
@@ -1154,10 +1156,11 @@ async function browseTo(path, mode) {
 }
 
 function renderBrowse(r) {
-  const pickingFile = browseMode === "subtitle";
-  $("pathTitle").textContent = pickingFile ? "选择字幕文件" : "选择保存目录";
+  const pickingFile = browseMode !== "dir";
+  const titles = { dir: "选择保存目录", subtitle: "选择字幕文件", video: "选择视频文件" };
+  $("pathTitle").textContent = titles[browseMode] || titles.dir;
   $("pathManual").placeholder = pickingFile
-    ? "也可以直接粘贴字幕文件的完整路径"
+    ? "也可以直接粘贴文件的完整路径"
     : "也可以直接粘贴完整路径";
   // 「选当前目录」在选文件时没有意义——要的是文件，不是一个文件夹
   $("pathUseCurrent").classList.toggle("hidden", pickingFile);
@@ -1184,9 +1187,10 @@ function renderBrowse(r) {
   if (!(r.dirs || []).length && !files.length) {
     const empty = document.createElement("div");
     empty.className = "empty";
-    empty.textContent = pickingFile
-      ? "（这里没有字幕文件，可以进子文件夹，或直接粘路径）"
-      : "（没有子文件夹，可直接点「选当前目录」）";
+    if (browseMode === "subtitle") empty.textContent = "（这里没有字幕文件，可以进子文件夹，或直接粘路径）";
+    else if (browseMode === "video")
+      empty.textContent = "（这里没有视频文件，可以进子文件夹，或直接粘路径）";
+    else empty.textContent = "（没有子文件夹，可直接点「选当前目录」）";
     list.appendChild(empty);
   }
   (r.dirs || []).forEach((dir) => {
@@ -1400,40 +1404,57 @@ async function mergeSubtitles() {
  *     落到 data/subtitles/ 下再用那份副本。
  */
 const SUBTITLE_EXT_RE = /\.(ass|ssa|srt|vtt|sup|sub)$/i;
+const VIDEO_EXT_RE = /\.(mkv|mp4|m4v|avi|ts|m2ts|mov|wmv|flv)$/i;
 
-/** 记住上次挑字幕的目录，下次直接从那儿开始翻。 */
-function rememberSubtitleDir(filePath) {
-  const parts = String(filePath || "").split(/[\\/]/);
+/** 文件路径 → 所在目录；没填路径就返回空串。 */
+function dirOf(filePath) {
+  const parts = String(filePath || "").trim().split(/[\\/]/);
   parts.pop();
-  const dir = parts.join("\\");
-  if (dir) localStorage.setItem("subtitleDir", dir);
+  return parts.join("\\");
+}
+
+/** 记住上次挑文件的目录，下次直接从那儿开始翻。 */
+function rememberDir(key, filePath) {
+  const dir = dirOf(filePath);
+  if (dir) localStorage.setItem(key, dir);
+}
+
+/** 选中一个路径：填进输入框、记住所在目录、给个提示。 */
+function fillPath(input, path, key, label) {
+  if (!path) return;
+  input.value = path;
+  rememberDir(key, path);
+  toast(`${label}：${path.split(/[\\/]/).pop()}`, "ok");
 }
 
 async function openSubtitlePicker() {
-  const current = $("subLocalFile").value.trim();
-  pickerHandler = (path) => {
-    if (!path) return;
-    $("subLocalFile").value = path;
-    rememberSubtitleDir(path);
-    toast("已选字幕：" + path.split(/[\\/]/).pop(), "ok");
-  };
+  pickerHandler = (path) => fillPath($("subLocalFile"), path, "subtitleDir", "已选字幕");
   $("pathManual").value = "";
-  // 起始目录：当前文件所在目录 → 上次挑字幕的目录 → 目标视频所在目录 → 下载目录
-  let start = "";
-  if (current) {
-    const parts = current.split(/[\\/]/);
-    parts.pop();
-    start = parts.join("\\");
-  }
-  if (!start) start = localStorage.getItem("subtitleDir") || "";
-  const target = $("subTarget").value.trim();
-  if (!start && target) {
-    const parts = target.split(/[\\/]/);
-    parts.pop();
-    start = parts.join("\\");
-  }
-  if (!start) start = state.savePath || state.defaultPath || "";
+  // 起始目录：当前文件 → 上次挑字幕的目录 → 目标视频所在目录 → 下载目录
+  const start =
+    dirOf($("subLocalFile").value) ||
+    localStorage.getItem("subtitleDir") ||
+    dirOf($("subTarget").value) ||
+    state.savePath ||
+    state.defaultPath ||
+    "";
   await browseTo(start, "subtitle");
+  $("pathDialog").showModal();
+}
+
+/** 「目标视频」/「来源视频」旁边的「选择」：同一个弹窗，切成选视频模式。 */
+async function openVideoPicker(inputId) {
+  const input = $(inputId);
+  pickerHandler = (path) => fillPath(input, path, "videoDir", "已选视频");
+  $("pathManual").value = "";
+  const start =
+    dirOf(input.value) ||
+    localStorage.getItem("videoDir") ||
+    dirOf($("subLocalFile").value) ||
+    state.savePath ||
+    state.defaultPath ||
+    "";
+  await browseTo(start, "video");
   $("pathDialog").showModal();
 }
 
@@ -1457,7 +1478,7 @@ async function uploadLocalSubtitle(file) {
       return;
     }
     input.value = r.path;
-    rememberSubtitleDir(r.path);
+    rememberDir("subtitleDir", r.path);
     toast(`已接收 ${r.name}（${r.size_text}），路径：${r.path}`, "ok");
   } catch (err) {
     input.value = "";
@@ -1465,30 +1486,66 @@ async function uploadLocalSubtitle(file) {
   }
 }
 
-/** 把这一行变成拖拽落点。 */
-function bindLocalSubtitleDrop() {
-  const row = $("subLocalRow");
+/**
+ * 拖进来的视频：浏览器不会把本地文件的绝对路径交给网页，视频又不可能像字幕那样
+ * 上传（一部片子几十 GB），所以拿「文件名 + 字节数」回服务端在下载目录里反查。
+ */
+async function resolveDroppedVideo(file, inputId) {
+  if (!VIDEO_EXT_RE.test((file && file.name) || "")) {
+    toast("这不是视频文件（只认 .mkv / .mp4 / .avi / .ts 等）", "bad");
+    return;
+  }
+  const input = $(inputId);
+  const previous = input.value;
+  input.value = "查找中…";
+  try {
+    const other = inputId === "subTarget" ? $("subSource").value : $("subTarget").value;
+    const params = new URLSearchParams({ name: file.name, size: String(file.size) });
+    // 另一栏已经填了的话，先在那个文件夹里找
+    if (dirOf(other)) params.set("dir", dirOf(other));
+    const r = await api("/api/videos/resolve?" + params.toString());
+    if (!r.ok) {
+      input.value = previous;
+      toast(r.error || "没找到这个文件的本机路径", "bad");
+      return;
+    }
+    fillPath(input, r.path, "videoDir", "已找到");
+  } catch (err) {
+    input.value = previous;
+    toast("查找失败：" + err.message, "bad");
+  }
+}
+
+/** 把任意元素变成「拖文件进来」的落点。 */
+function makeDropTarget(element, onFile) {
   ["dragenter", "dragover"].forEach((type) => {
-    row.addEventListener(type, (event) => {
+    element.addEventListener(type, (event) => {
       if (!event.dataTransfer) return;
       // 只有拖「文件」时才接管（拖动文本/链接不要高亮）
       if (!Array.from(event.dataTransfer.types || []).includes("Files")) return;
       event.preventDefault();
-      row.classList.add("drag-over");
+      element.classList.add("drag-over");
     });
   });
-  row.addEventListener("dragleave", (event) => {
-    // 从子元素之间移动也会触发 dragleave，只在真正离开整行时取消高亮
-    if (row.contains(event.relatedTarget)) return;
-    row.classList.remove("drag-over");
+  element.addEventListener("dragleave", (event) => {
+    // 从子元素之间移动也会触发 dragleave，只在真正离开整块时取消高亮
+    if (element.contains(event.relatedTarget)) return;
+    element.classList.remove("drag-over");
   });
-  row.addEventListener("drop", (event) => {
+  element.addEventListener("drop", (event) => {
     const file = event.dataTransfer && event.dataTransfer.files && event.dataTransfer.files[0];
     if (!file) return;
     event.preventDefault();
-    row.classList.remove("drag-over");
-    uploadLocalSubtitle(file);
+    element.classList.remove("drag-over");
+    onFile(file);
   });
+}
+
+/** 三个落点：本地字幕那一行、目标视频、来源视频。 */
+function bindDropTargets() {
+  makeDropTarget($("subLocalRow"), uploadLocalSubtitle);
+  makeDropTarget($("subTargetField"), (file) => resolveDroppedVideo(file, "subTarget"));
+  makeDropTarget($("subSourceField"), (file) => resolveDroppedVideo(file, "subSource"));
   // 拖到别处松手时，别让浏览器把那个文件当成新页面打开（会把当前页面顶掉）
   window.addEventListener("dragover", (event) => event.preventDefault());
   window.addEventListener("drop", (event) => event.preventDefault());

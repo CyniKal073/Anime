@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 from pathlib import Path
 
 import pytest
@@ -886,6 +887,72 @@ def test_browse_without_kind_keeps_old_shape(client, tmp_path):
     (tmp_path / "01.ass").write_text("x", encoding="utf-8")
     body = client.get("/api/browse", params={"path": str(tmp_path)}).json()
     assert "files" not in body
+
+
+def test_browse_lists_video_files_when_asked(client, tmp_path):
+    """目标视频 / 来源视频的「选择」：同一个弹窗，只列视频。"""
+    (tmp_path / "E01.mkv").write_bytes(b"x")
+    (tmp_path / "01.ass").write_text("x", encoding="utf-8")
+    body = client.get("/api/browse", params={"path": str(tmp_path), "kind": "video"}).json()
+    assert [item["name"] for item in body["files"]] == ["E01.mkv"]
+
+
+def _use_savepath(ctx, path):
+    """把「下载目录」指到临时目录，免得测试去扫真实的 library。"""
+    ctx.settings = dataclasses.replace(ctx.settings, qbit_savepath=str(path))
+
+
+def test_resolve_video_finds_unique_match_by_name_and_size(client, ctx, tmp_path):
+    """拖视频进来时，靠「文件名 + 大小」在下载目录里反查真实路径。"""
+    _use_savepath(ctx, tmp_path)
+    nested = tmp_path / "Seitokai" / "Season 1"
+    nested.mkdir(parents=True)
+    video = nested / "E01.mkv"
+    video.write_bytes(b"12345")
+
+    body = client.get(
+        "/api/videos/resolve", params={"name": "E01.mkv", "size": 5}
+    ).json()
+
+    assert body["ok"] is True
+    assert body["path"] == str(video)
+
+
+def test_resolve_video_rejects_same_name_different_size(client, ctx, tmp_path):
+    """同名但大小对不上 = 不是我们要的那个文件，不能凑合。"""
+    _use_savepath(ctx, tmp_path)
+    (tmp_path / "E01.mkv").write_bytes(b"12345")
+
+    body = client.get(
+        "/api/videos/resolve", params={"name": "E01.mkv", "size": 999}
+    ).json()
+
+    assert body["ok"] is False
+    assert "没在下载目录里找到" in body["error"]
+
+
+def test_resolve_video_refuses_ambiguous_matches(client, ctx, tmp_path):
+    _use_savepath(ctx, tmp_path)
+    for sub in ("A", "B"):
+        folder = tmp_path / sub
+        folder.mkdir()
+        (folder / "E01.mkv").write_bytes(b"12345")
+
+    body = client.get(
+        "/api/videos/resolve", params={"name": "E01.mkv", "size": 5}
+    ).json()
+
+    assert body["ok"] is False
+    assert "同名同大小" in body["error"]
+    assert len(body["candidates"]) == 2
+
+
+def test_resolve_video_rejects_non_video(client, ctx, tmp_path):
+    _use_savepath(ctx, tmp_path)
+    (tmp_path / "notes.txt").write_text("x", encoding="utf-8")
+    body = client.get("/api/videos/resolve", params={"name": "notes.txt"}).json()
+    assert body["ok"] is False
+    assert "不是视频文件" in body["error"]
 
 
 def test_upload_saves_local_subtitle(client):

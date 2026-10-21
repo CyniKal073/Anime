@@ -227,15 +227,23 @@
     <h2>字幕合并 <span class="badge" id="mkvVersion"></span></h2>
     <p class="hint">把来源视频里的字幕轨搬进目标视频，视频本身不重编码。留空输出文件名时会在目标旁边生成「原名.subbed.mkv」。</p>
 
+    <!-- 两个视频框都可以：直接输入、从 datalist 补全、「选择」开路径弹窗、或把文件拖进来。
+         弹窗就是下面那个 #pathDialog，只是切成了「选视频文件」模式。 -->
     <div class="sub-grid">
       <!-- 目标视频：想保留画质的那一个 -->
-      <label>目标视频（想保留的版本）
-        <input id="subTarget" list="libraryFiles" placeholder="D:\Anime\library\...\xxx.mkv">
-      </label>
+      <div class="sub-field">目标视频（想保留的版本）
+        <div class="path-field" id="subTargetField">
+          <input id="subTarget" list="libraryFiles" placeholder="拖视频进来，或点「选择」">
+          <button id="subTargetPick" class="ghost small" type="button">选择</button>
+        </div>
+      </div>
       <!-- 来源视频：带中文字幕的那一个 -->
-      <label>来源视频（带中文字幕）
-        <input id="subSource" list="libraryFiles" placeholder="另一个文件">
-      </label>
+      <div class="sub-field">来源视频（带中文字幕）
+        <div class="path-field" id="subSourceField">
+          <input id="subSource" list="libraryFiles" placeholder="拖视频进来，或点「选择」">
+          <button id="subSourcePick" class="ghost small" type="button">选择</button>
+        </div>
+      </div>
     </div>
     <!-- 下载目录下的视频文件清单，供上面两个输入框自动补全 -->
     <datalist id="libraryFiles"></datalist>
